@@ -18,7 +18,7 @@ module Api
         def rows
           prefixes = Array(payload['prefixes'])
           ours = connection.select_rows(<<~SQL).to_h
-            SELECT row_uuid, row_hash FROM sync_site_mirror
+            SELECT row_uuid, row_hash FROM sync_site_backup
             WHERE site_code = #{q(site_code)} AND table_name = #{q(table)} AND deleted = 0
               AND LEFT(row_uuid, 4) IN (#{prefixes.map { |p| q(p) }.join(', ').presence || 'NULL'})
           SQL
@@ -34,7 +34,7 @@ module Api
         def mirror_rows
           uuids = Array(payload['uuids']).first(5000)
           rows = connection.select_rows(<<~SQL).map { |uuid, json| { 'uuid' => uuid, 'row' => JSON.parse(json) } }
-            SELECT row_uuid, row_json FROM sync_site_mirror
+            SELECT row_uuid, row_json FROM sync_site_backup
             WHERE site_code = #{q(site_code)} AND table_name = #{q(table)} AND deleted = 0
               AND row_uuid IN (#{uuids.map { |u| q(u) }.join(', ').presence || 'NULL'})
           SQL

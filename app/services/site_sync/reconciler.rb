@@ -113,8 +113,8 @@ module SiteSync
              end
       @conn.execute(<<~SQL)
         INSERT INTO sync_change_log
-          (lane, table_name, op, row_pk, row_uuid, before_json, after_json, row_hash, origin, job, captured_at)
-        SELECT #{@conn.quote(Config.lane(table))}, #{@conn.quote(table)}, 'R', t.`#{Config.pk(table)}`, #{uuid_col},
+          (priority, table_name, operation, local_id, row_uuid, before_json, after_json, row_hash, source, job, captured_at)
+        SELECT #{@conn.quote(Config.priority(table))}, #{@conn.quote(table)}, 'R', t.`#{Config.pk(table)}`, #{uuid_col},
                NULL, #{RowSql.json(table, 't.')}, #{RowSql.hash_expr(table, 't.')}, 'local', 'reconcile:resend', NOW(6)
         FROM `#{table}` t #{join}
         WHERE #{uuid_col} IN (#{uuids.map { |u| @conn.quote(u) }.join(', ')})

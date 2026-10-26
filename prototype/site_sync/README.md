@@ -48,7 +48,7 @@ below).
 | tamper | KCH's API runs as the restricted `mahis_app` account and its saves are still captured (triggers run as `mahis_sync`); that account cannot delete queued changes; a batch edited after sealing was refused with an alert; a replayed or altered signed request was refused |
 | clock | KCH's clock jumped a year ahead: its changes were still accepted, capped at central's time with an alert, and later changes flowed normally |
 | reconcile | Two rows corrupted behind the app's back were found by Merkle comparison (8 KB exchanged). The deleted row came back automatically; the changed row was held until a data officer approved the repair |
-| restore | ZCH wiped and rebuilt from central: a first attempt was cut off part-way (logins refused meanwhile), the second resumed and finished; exact checksums verified, same local ids, new epoch; the old server stays locked out |
+| restore | ZCH wiped and rebuilt from central: a first attempt was cut off part-way (logins refused meanwhile), the second resumed and finished; exact checksums verified, same local ids, new server generation; the old server stays locked out |
 
 | Measurement | Value |
 |---|---|
@@ -125,7 +125,7 @@ site server with `rake site_sync:benchmark` (stop the agent first).
   from central's time.
 - **Restore resumes.** Each page and the restore's progress commit together,
   so after a power cut the restore continues from the last page for the same
-  epoch; a table that fails its checksum is downloaded again from scratch. Once
+  server_generation; a table that fails its checksum is downloaded again from scratch. Once
   central accepts the restore the site leaves restoring mode at once, and the
   catch-up pull is an ordinary pull: if it fails, the agent's next pull catches up.
 - **Parked rows give up.** A change from central whose parent never arrives is

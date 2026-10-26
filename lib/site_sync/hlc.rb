@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module SiteSync
-  # Hybrid logical clock, as one integer: microseconds since the Unix epoch,
+  # Hybrid logical clock, as one integer: microseconds since the Unix server_generation,
   # bumped by one whenever the wall clock has not moved past the last value.
   # Values only ever increase on a node, even if its clock is set back (for
   # example after a power cut resets it), because the last value is persisted
@@ -27,8 +27,8 @@ module SiteSync
       [last.to_i + 1, remote.to_i, wall_us].max
     end
 
-    def to_time(hlc)
-      Time.at(Rational(hlc, 1_000_000))
+    def to_time(change_time)
+      Time.at(Rational(change_time, 1_000_000))
     end
   end
 end

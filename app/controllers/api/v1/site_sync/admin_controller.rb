@@ -46,7 +46,7 @@ module Api
 
         # POST /api/v1/site_sync/admin/sites/:code/freeze
         # Step 1-2 of a restore: stop the old server (its secret is replaced)
-        # and open a new epoch for the replacement.
+        # and open a new server generation for the replacement.
         def freeze
           site = ::SiteSync::Central.site(params[:code])
           return render json: { error: 'unknown_site' }, status: :not_found unless site
@@ -54,22 +54,22 @@ module Api
           secret = SecureRandom.hex(32)
           ::SiteSync::Central.with_feed_lock do
             connection.execute(<<~SQL)
-              UPDATE sync_sites SET status = 'restoring', epoch = epoch + 1, secret = #{q(::SiteSync::SecretCipher.encrypt(secret))},
-                restore_point_gseq = (SELECT COALESCE(MAX(gseq), 0) FROM sync_central_log), updated_at = NOW(6)
+              UPDATE sync_sites SET status = 'restoring', server_generation = server_generation + 1, secret = #{q(::SiteSync::SecretCipher.encrypt(secret))},
+                restore_from_global_seq = (SELECT COALESCE(MAX(global_seq), 0) FROM sync_central_feed), updated_at = NOW(6)
               WHERE site_code = #{q(params[:code])}
             SQL
           end
           site = ::SiteSync::Central.site(params[:code])
           ::SiteSync::Central.alert(params[:code], 'frozen',
-                                    "Frozen for restore; epoch #{site['epoch']} opened and the old server's secret revoked")
-          render json: { site_code: params[:code], epoch: site['epoch'].to_i, secret:,
-                         restore_point_gseq: site['restore_point_gseq'].to_i }
+                                    "Frozen for restore; server generation #{site['server_generation']} opened and the old server's secret revoked")
+          render json: { site_code: params[:code], server_generation: site['server_generation'].to_i, secret:,
+                         restore_from_global_seq: site['restore_from_global_seq'].to_i }
         end
 
         # GET /api/v1/site_sync/admin/quarantine
         def quarantine
           render json: connection.select_all(<<~SQL).to_a
-            SELECT id, site_code, table_name, row_uuid, reason, details, parent_uuid, request_id, status, created_at
+            SELECT id, site_code, table_name, row_uuid, reason, details, waiting_for_uuid, request_id, status, created_at
             FROM sync_quarantine ORDER BY id DESC LIMIT 200
           SQL
         end

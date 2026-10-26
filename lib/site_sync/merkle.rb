@@ -20,7 +20,7 @@ module SiteSync
     # Central side: digests of the backup copy of one site.
     def mirror_digests(connection, site_code, table, prefix_len, within = nil)
       source = <<~SQL
-        (SELECT row_uuid, row_hash FROM sync_site_mirror
+        (SELECT row_uuid, row_hash FROM sync_site_backup
          WHERE site_code = #{connection.quote(site_code)} AND table_name = #{connection.quote(table)} AND deleted = 0) x
       SQL
       digests(connection, source, prefix_len, within)

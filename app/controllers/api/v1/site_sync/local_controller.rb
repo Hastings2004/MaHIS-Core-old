@@ -10,8 +10,8 @@ module Api
         # Every captured change made by one API request, and where it is now.
         def request_changes
           changes = ActiveRecord::Base.lease_connection.select_all(<<~SQL).to_a
-            SELECT l.id, l.table_name, l.op, l.row_uuid, l.endpoint, l.user_uuid, l.captured_at,
-                   b.lane, b.seq AS batch_seq, COALESCE(b.status, 'unsealed') AS sync_status, b.acked_at
+            SELECT l.id, l.table_name, l.operation, l.row_uuid, l.endpoint, l.user_uuid, l.captured_at,
+                   b.priority, b.batch_number AS batch_seq, COALESCE(b.status, 'unsealed') AS sync_status, b.acknowledged_at
             FROM sync_change_log l LEFT JOIN sync_batches b ON b.id = l.batch_id
             WHERE l.request_id = #{ActiveRecord::Base.lease_connection.quote(params[:request_id])}
             ORDER BY l.id
@@ -23,7 +23,7 @@ module Api
         def status
           heartbeat = ::SiteSync::Heartbeat.new(client: nil)
           notices = ActiveRecord::Base.lease_connection.select_all(<<~SQL).to_a
-            SELECT event_id, table_name, row_uuid, reason, details, status, created_at
+            SELECT change_key, table_name, row_uuid, reason, details, status, created_at
             FROM sync_quarantine_notices WHERE status = 'open' ORDER BY id DESC LIMIT 100
           SQL
           render json: heartbeat.status.merge('quarantine' => notices)

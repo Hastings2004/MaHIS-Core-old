@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module SiteSync
-  # Small key/value store (sync_state) for the agent's durable state: epoch,
+  # Small key/value store (sync_state) for the agent's durable state: server_generation,
   # last HLC, pull cursor. Writes join the caller's transaction, so state moves
   # forward only together with the data it describes.
   module State
@@ -28,8 +28,8 @@ module SiteSync
       SQL
     end
 
-    def epoch
-      get_i('epoch', 1)
+    def server_generation
+      get_i('server_generation', 1)
     end
 
     # Checked on every API request while sync is on, so cached briefly.

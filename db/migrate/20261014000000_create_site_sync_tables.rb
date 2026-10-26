@@ -21,22 +21,22 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
     execute <<~SQL
       CREATE TABLE sync_change_log (
         id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-        lane VARCHAR(16) NOT NULL,
+        priority VARCHAR(16) NOT NULL,
         batch_id BIGINT NULL,
         table_name VARCHAR(64) NOT NULL,
-        op CHAR(1) NOT NULL,
-        row_pk BIGINT NOT NULL,
+        operation CHAR(1) NOT NULL,
+        local_id BIGINT NOT NULL,
         row_uuid CHAR(38) NOT NULL,
         before_json JSON NULL,
         after_json JSON NULL,
         row_hash CHAR(64) NULL,
-        origin VARCHAR(8) NOT NULL,
+        source VARCHAR(8) NOT NULL,
         request_id VARCHAR(64) NULL,
         endpoint VARCHAR(160) NULL,
         job VARCHAR(160) NULL,
         user_uuid CHAR(38) NULL,
         captured_at DATETIME(6) NOT NULL,
-        KEY idx_sync_change_log_unsealed (batch_id, lane, id),
+        KEY idx_sync_change_log_unsealed (batch_id, priority, id),
         KEY idx_sync_change_log_row (table_name, row_uuid),
         KEY idx_sync_change_log_request (request_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
@@ -45,45 +45,45 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
     execute <<~SQL
       CREATE TABLE sync_batches (
         id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-        lane VARCHAR(16) NOT NULL,
-        epoch INT NOT NULL,
-        seq BIGINT NOT NULL,
-        first_log_id BIGINT NOT NULL,
-        last_log_id BIGINT NOT NULL,
-        event_count INT NOT NULL,
-        prev_hash CHAR(64) NOT NULL,
+        priority VARCHAR(16) NOT NULL,
+        server_generation INT NOT NULL,
+        batch_number BIGINT NOT NULL,
+        first_change_id BIGINT NOT NULL,
+        last_change_id BIGINT NOT NULL,
+        change_count INT NOT NULL,
+        previous_batch_hash CHAR(64) NOT NULL,
         batch_hash CHAR(64) NOT NULL,
         payload LONGBLOB NOT NULL,
         status VARCHAR(16) NOT NULL DEFAULT 'sealed',
         attempts INT NOT NULL DEFAULT 0,
         last_error TEXT NULL,
-        ack_json JSON NULL,
+        central_reply_json JSON NULL,
         created_at DATETIME(6) NOT NULL,
-        acked_at DATETIME(6) NULL,
-        UNIQUE KEY idx_sync_batches_lane_seq (epoch, lane, seq),
-        KEY idx_sync_batches_status (status, lane, seq)
+        acknowledged_at DATETIME(6) NULL,
+        UNIQUE KEY idx_sync_batches_lane_seq (server_generation, priority, batch_number),
+        KEY idx_sync_batches_status (status, priority, batch_number)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
     SQL
 
     execute <<~SQL
-      CREATE TABLE sync_pending_apply (
+      CREATE TABLE sync_waiting_changes (
         id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-        gseq BIGINT NULL,
+        global_seq BIGINT NULL,
         table_name VARCHAR(64) NOT NULL,
         row_uuid CHAR(38) NOT NULL,
-        event_json JSON NOT NULL,
+        change_json JSON NOT NULL,
         attempts INT NOT NULL DEFAULT 0,
         last_error TEXT NULL,
         created_at DATETIME(6) NOT NULL,
         orphaned_at DATETIME(6) NULL,
-        KEY idx_sync_pending_apply_open (orphaned_at, id)
+        KEY idx_sync_waiting_changes_open (orphaned_at, id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
     SQL
 
     execute <<~SQL
       CREATE TABLE sync_quarantine_notices (
         id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-        event_id VARCHAR(80) NOT NULL,
+        change_key VARCHAR(80) NOT NULL,
         table_name VARCHAR(64) NOT NULL,
         row_uuid CHAR(38) NOT NULL,
         reason VARCHAR(64) NOT NULL,
@@ -91,7 +91,7 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
         status VARCHAR(16) NOT NULL DEFAULT 'open',
         created_at DATETIME(6) NOT NULL,
         resolved_at DATETIME(6) NULL,
-        UNIQUE KEY idx_sync_quarantine_notices_event (event_id),
+        UNIQUE KEY idx_sync_quarantine_notices_event (change_key),
         KEY idx_sync_quarantine_notices_row (row_uuid, status)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
     SQL
@@ -103,7 +103,7 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
       CREATE TABLE sync_row_versions (
         table_name VARCHAR(64) NOT NULL,
         row_uuid CHAR(38) NOT NULL,
-        hlc BIGINT NOT NULL,
+        change_time BIGINT NOT NULL,
         site_code VARCHAR(16) NOT NULL,
         PRIMARY KEY (table_name, row_uuid)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
@@ -129,8 +129,8 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
         location_id INT NULL,
         secret VARCHAR(255) NOT NULL,
         status VARCHAR(16) NOT NULL DEFAULT 'active',
-        epoch INT NOT NULL DEFAULT 1,
-        restore_point_gseq BIGINT NULL,
+        server_generation INT NOT NULL DEFAULT 1,
+        restore_from_global_seq BIGINT NULL,
         last_heartbeat_at DATETIME(6) NULL,
         heartbeat_json JSON NULL,
         created_at DATETIME(6) NOT NULL,
@@ -139,14 +139,14 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
     SQL
 
     execute <<~SQL
-      CREATE TABLE sync_site_lanes (
+      CREATE TABLE sync_site_progress (
         site_code VARCHAR(16) NOT NULL,
-        epoch INT NOT NULL,
-        lane VARCHAR(16) NOT NULL,
-        committed_seq BIGINT NOT NULL DEFAULT 0,
+        server_generation INT NOT NULL,
+        priority VARCHAR(16) NOT NULL,
+        last_batch_number BIGINT NOT NULL DEFAULT 0,
         last_batch_hash CHAR(64) NOT NULL,
         updated_at DATETIME(6) NOT NULL,
-        PRIMARY KEY (site_code, epoch, lane)
+        PRIMARY KEY (site_code, server_generation, priority)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
     SQL
 
@@ -155,32 +155,32 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
     execute <<~SQL
       CREATE TABLE sync_received_batches (
         site_code VARCHAR(16) NOT NULL,
-        epoch INT NOT NULL,
-        lane VARCHAR(16) NOT NULL,
-        seq BIGINT NOT NULL,
+        server_generation INT NOT NULL,
+        priority VARCHAR(16) NOT NULL,
+        batch_number BIGINT NOT NULL,
         batch_hash CHAR(64) NOT NULL,
-        event_count INT NOT NULL,
-        ack_json JSON NOT NULL,
+        change_count INT NOT NULL,
+        central_reply_json JSON NOT NULL,
         received_at DATETIME(6) NOT NULL,
-        PRIMARY KEY (site_code, epoch, lane, seq)
+        PRIMARY KEY (site_code, server_generation, priority, batch_number)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
     SQL
 
     # Exact copy of every site's rows, with the site's own local ids. This is
     # the national backup: restores and nightly reconciliation read it.
     execute <<~SQL
-      CREATE TABLE sync_site_mirror (
+      CREATE TABLE sync_site_backup (
         site_code VARCHAR(16) NOT NULL,
         table_name VARCHAR(64) NOT NULL,
         row_uuid CHAR(38) NOT NULL,
         local_id BIGINT NOT NULL,
         row_json JSON NOT NULL,
         row_hash CHAR(64) NOT NULL,
-        hlc BIGINT NOT NULL,
+        change_time BIGINT NOT NULL,
         deleted TINYINT NOT NULL DEFAULT 0,
         updated_at DATETIME(6) NOT NULL,
         PRIMARY KEY (site_code, table_name, row_uuid),
-        KEY idx_sync_site_mirror_local (site_code, table_name, local_id)
+        KEY idx_sync_site_backup_local (site_code, table_name, local_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
     SQL
 
@@ -198,7 +198,7 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
         table_name VARCHAR(64) NOT NULL,
         row_uuid CHAR(38) NOT NULL,
         column_name VARCHAR(64) NOT NULL,
-        hlc BIGINT NOT NULL,
+        change_time BIGINT NOT NULL,
         site_code VARCHAR(16) NOT NULL,
         PRIMARY KEY (table_name, row_uuid, column_name)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
@@ -210,13 +210,13 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
         table_name VARCHAR(64) NOT NULL,
         row_uuid CHAR(38) NOT NULL,
         column_name VARCHAR(64) NOT NULL,
-        kind VARCHAR(16) NOT NULL,
+        conflict_type VARCHAR(16) NOT NULL,
         kept_value TEXT NULL,
         kept_site VARCHAR(16) NULL,
-        kept_hlc BIGINT NULL,
+        kept_change_time BIGINT NULL,
         losing_value TEXT NULL,
         losing_site VARCHAR(16) NULL,
-        losing_hlc BIGINT NULL,
+        losing_change_time BIGINT NULL,
         status VARCHAR(16) NOT NULL DEFAULT 'open',
         created_at DATETIME(6) NOT NULL,
         KEY idx_sync_conflicts_row (table_name, row_uuid)
@@ -227,39 +227,39 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
       CREATE TABLE sync_quarantine (
         id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         site_code VARCHAR(16) NOT NULL,
-        event_id VARCHAR(80) NOT NULL,
+        change_key VARCHAR(80) NOT NULL,
         table_name VARCHAR(64) NOT NULL,
         row_uuid CHAR(38) NOT NULL,
         request_id VARCHAR(64) NULL,
         reason VARCHAR(64) NOT NULL,
         details TEXT NULL,
-        parent_uuid CHAR(38) NULL,
-        event_json JSON NOT NULL,
+        waiting_for_uuid CHAR(38) NULL,
+        change_json JSON NOT NULL,
         status VARCHAR(16) NOT NULL DEFAULT 'open',
         created_at DATETIME(6) NOT NULL,
         resolved_at DATETIME(6) NULL,
-        UNIQUE KEY idx_sync_quarantine_event (site_code, event_id),
+        UNIQUE KEY idx_sync_quarantine_event (site_code, change_key),
         KEY idx_sync_quarantine_row (row_uuid, status),
-        KEY idx_sync_quarantine_parent (parent_uuid, status)
+        KEY idx_sync_quarantine_parent (waiting_for_uuid, status)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
     SQL
 
-    # The downstream feed. gseq is assigned under a lock in commit order, so
+    # The downstream feed. global_seq is assigned under a lock in commit order, so
     # a site reading "everything after my cursor" can never skip a row.
     execute <<~SQL
-      CREATE TABLE sync_central_log (
-        gseq BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-        origin_site VARCHAR(16) NOT NULL,
-        target_site VARCHAR(16) NULL,
+      CREATE TABLE sync_central_feed (
+        global_seq BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        from_site VARCHAR(16) NOT NULL,
+        for_site VARCHAR(16) NULL,
         table_name VARCHAR(64) NOT NULL,
-        op CHAR(1) NOT NULL,
+        operation CHAR(1) NOT NULL,
         row_uuid CHAR(38) NOT NULL,
         patient_uuid CHAR(38) NULL,
-        hlc BIGINT NOT NULL,
-        event_json JSON NOT NULL,
+        change_time BIGINT NOT NULL,
+        change_json JSON NOT NULL,
         created_at DATETIME(6) NOT NULL,
-        KEY idx_sync_central_log_patient (patient_uuid, gseq),
-        KEY idx_sync_central_log_target (target_site, gseq)
+        KEY idx_sync_central_feed_patient (patient_uuid, global_seq),
+        KEY idx_sync_central_feed_target (for_site, global_seq)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
     SQL
 
@@ -291,7 +291,7 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
       CREATE TABLE sync_request_nonces (
         nonce CHAR(32) NOT NULL PRIMARY KEY,
         site_code VARCHAR(16) NOT NULL,
-        site_timestamp BIGINT NULL,
+        signed_at_us BIGINT NULL,
         seen_at DATETIME(6) NOT NULL,
         KEY idx_sync_request_nonces_seen (seen_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3
@@ -301,7 +301,7 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
       CREATE TABLE sync_alerts (
         id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         site_code VARCHAR(16) NULL,
-        kind VARCHAR(48) NOT NULL,
+        alert_type VARCHAR(48) NOT NULL,
         message TEXT NOT NULL,
         created_at DATETIME(6) NOT NULL,
         KEY idx_sync_alerts_site (site_code, created_at)
@@ -345,9 +345,9 @@ class CreateSiteSyncTables < ActiveRecord::Migration[7.0]
 
   def down
     %w[sync_duplicate_candidates sync_central_corrections sync_alerts sync_request_nonces sync_deleted_records
-       sync_subscriptions sync_central_log sync_quarantine sync_conflicts sync_field_versions sync_row_owners
-       sync_site_mirror sync_received_batches sync_site_lanes sync_sites sync_reconciliation_runs sync_row_versions
-       sync_quarantine_notices sync_pending_apply sync_batches sync_change_log sync_state].each do |table|
+       sync_subscriptions sync_central_feed sync_quarantine sync_conflicts sync_field_versions sync_row_owners
+       sync_site_backup sync_received_batches sync_site_progress sync_sites sync_reconciliation_runs sync_row_versions
+       sync_quarantine_notices sync_waiting_changes sync_batches sync_change_log sync_state].each do |table|
       execute "DROP TABLE IF EXISTS #{table}"
     end
   end

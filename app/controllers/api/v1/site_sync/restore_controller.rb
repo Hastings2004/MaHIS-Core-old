@@ -16,13 +16,13 @@ module Api
             { 'count' => digest.split(':').first.to_i, 'digest' => digest }
           end
           render json: {
-            epoch: site['epoch'].to_i,
-            restore_point_gseq: site['restore_point_gseq'].to_i,
+            server_generation: site['server_generation'].to_i,
+            restore_from_global_seq: site['restore_from_global_seq'].to_i,
             last_received_at: connection.select_value(
               "SELECT MAX(received_at) FROM sync_received_batches WHERE site_code = #{q(site_code)}"
             )&.iso8601,
-            max_hlc: connection.select_value(
-              "SELECT COALESCE(MAX(hlc), 0) FROM sync_site_mirror WHERE site_code = #{q(site_code)}"
+            max_change_time: connection.select_value(
+              "SELECT COALESCE(MAX(change_time), 0) FROM sync_site_backup WHERE site_code = #{q(site_code)}"
             ).to_i,
             tables:
           }
@@ -38,7 +38,7 @@ module Api
 
           limit = params.fetch(:limit, 2000).to_i.clamp(1, 10_000)
           rows = connection.select_rows(<<~SQL)
-            SELECT local_id, row_json FROM sync_site_mirror
+            SELECT local_id, row_json FROM sync_site_backup
             WHERE site_code = #{q(site_code)} AND table_name = #{q(table)} AND deleted = 0
               AND local_id > #{params[:after_id].to_i}
             ORDER BY local_id LIMIT #{limit}
@@ -54,8 +54,8 @@ module Api
           connection.execute(<<~SQL)
             UPDATE sync_sites SET status = 'active', updated_at = NOW(6) WHERE site_code = #{q(site_code)}
           SQL
-          ::SiteSync::Central.alert(site_code, 'restore_complete', "Site restored and verified in epoch #{site['epoch']}")
-          render json: { status: 'active', epoch: site['epoch'].to_i }
+          ::SiteSync::Central.alert(site_code, 'restore_complete', "Site restored and verified in server generation #{site['server_generation']}")
+          render json: { status: 'active', server_generation: site['server_generation'].to_i }
         end
 
         private

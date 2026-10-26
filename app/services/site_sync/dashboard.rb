@@ -12,7 +12,7 @@ module SiteSync
       {
         'generated_at' => Time.now.iso8601,
         'sites' => @conn.select_all('SELECT * FROM sync_sites ORDER BY site_code').to_a.map { |site| site_row(site) },
-        'feed_size' => @conn.select_value('SELECT COUNT(*) FROM sync_central_log').to_i,
+        'feed_size' => @conn.select_value('SELECT COUNT(*) FROM sync_central_feed').to_i,
         'open_conflicts' => @conn.select_value("SELECT COUNT(*) FROM sync_conflicts WHERE status = 'open'").to_i,
         'logged_conflicts' => @conn.select_value("SELECT COUNT(*) FROM sync_conflicts WHERE status = 'logged'").to_i,
         'duplicates' => @conn.select_all(<<~SQL).to_a,
@@ -28,7 +28,7 @@ module SiteSync
           ORDER BY id DESC LIMIT 10
         SQL
         'alerts' => @conn.select_all(
-          'SELECT site_code, kind, message, created_at FROM sync_alerts ORDER BY id DESC LIMIT 15'
+          'SELECT site_code, alert_type, message, created_at FROM sync_alerts ORDER BY id DESC LIMIT 15'
         ).to_a
       }
     end
@@ -48,7 +48,7 @@ module SiteSync
       )
       {
         'site_code' => site['site_code'], 'name' => location_name || site['name'], 'location_id' => site['location_id'],
-        'status' => site['status'], 'epoch' => site['epoch'].to_i,
+        'status' => site['status'], 'server_generation' => site['server_generation'].to_i,
         'heartbeat_age_s' => site['last_heartbeat_at'] && (Time.now - site['last_heartbeat_at']).round,
         'backlog' => beat['backlog'] || {}, 'oldest_unsent_s' => beat['oldest_unsent_seconds'],
         'clock_offset_s' => beat['clock_offset_s'], 'mode' => beat['mode'],
@@ -56,10 +56,10 @@ module SiteSync
         'triggers' => beat['triggers_installed'] && "#{beat['triggers_installed']}/#{beat['triggers_expected']}",
         'last_batch_at' => @conn.select_value("SELECT MAX(received_at) FROM sync_received_batches WHERE site_code = #{code}"),
         'events_received' => @conn.select_value(
-          "SELECT COALESCE(SUM(event_count), 0) FROM sync_received_batches WHERE site_code = #{code}"
+          "SELECT COALESCE(SUM(change_count), 0) FROM sync_received_batches WHERE site_code = #{code}"
         ).to_i,
         'backup_rows' => @conn.select_value(
-          "SELECT COUNT(*) FROM sync_site_mirror WHERE site_code = #{code} AND deleted = 0"
+          "SELECT COUNT(*) FROM sync_site_backup WHERE site_code = #{code} AND deleted = 0"
         ).to_i,
         'open_quarantine' => @conn.select_value(
           "SELECT COUNT(*) FROM sync_quarantine WHERE site_code = #{code} AND status = 'open'"
@@ -75,7 +75,7 @@ module SiteSync
     def self.html(data)
       esc = ->(value) { ERB::Util.html_escape(value.to_s) }
       sites = data['sites'].map do |s|
-        backlog = s['backlog'].map { |lane, n| "#{lane}: #{n}" }.join(', ').presence || '0'
+        backlog = s['backlog'].map { |priority, n| "#{priority}: #{n}" }.join(', ').presence || '0'
         rec = s['reconciliation']
         rec_text = rec ? "#{rec['status']}, #{rec['differences']} diff, #{rec['bytes']} B" : '—'
         status_class = s['status'] == 'active' ? 'ok' : 'warn'
@@ -101,7 +101,7 @@ module SiteSync
       end.join
       alerts = data['alerts'].map do |a|
         "<tr><td>#{esc[a['created_at']&.strftime('%H:%M:%S')]}</td><td>#{esc[a['site_code']]}</td>" \
-          "<td>#{esc[a['kind']]}</td><td>#{esc[a['message']]}</td></tr>"
+          "<td>#{esc[a['alert_type']]}</td><td>#{esc[a['message']]}</td></tr>"
       end.join
       duplicates = data['duplicates'].map do |d|
         "<tr><td>#{d['id']}</td><td><code>#{esc[d['new_uuid']]}</code></td><td><code>#{esc[d['matched_uuid']]}</code></td>" \

@@ -148,10 +148,10 @@ namespace :site_sync do
   desc 'Retry changes from central that were given up as orphans (e.g. after their parent was released)'
   task retry_orphans: :environment do
     connection = ActiveRecord::Base.lease_connection
-    connection.execute('UPDATE sync_pending_apply SET orphaned_at = NULL, attempts = 0 WHERE orphaned_at IS NOT NULL')
+    connection.execute('UPDATE sync_waiting_changes SET orphaned_at = NULL, attempts = 0 WHERE orphaned_at IS NOT NULL')
     puller = SiteSync::Puller.new(client: nil)
     puller.retry_pending
-    left = connection.select_value('SELECT COUNT(*) FROM sync_pending_apply').to_i
+    left = connection.select_value('SELECT COUNT(*) FROM sync_waiting_changes').to_i
     puts "retried orphans: #{puller.stats[:pending_applied]} applied, #{left} still waiting"
   end
 
@@ -164,8 +164,8 @@ namespace :site_sync do
       join = via ? "JOIN `#{via}` v ON v.`#{SiteSync::Config.pk(via)}` = t.`#{SiteSync::Config.pk(table)}`" : ''
       connection.execute(<<~SQL)
         INSERT INTO sync_change_log
-          (lane, table_name, op, row_pk, row_uuid, before_json, after_json, row_hash, origin, job, captured_at)
-        SELECT #{connection.quote(SiteSync::Config.lane(table))}, #{connection.quote(table)}, 'S',
+          (priority, table_name, operation, local_id, row_uuid, before_json, after_json, row_hash, source, job, captured_at)
+        SELECT #{connection.quote(SiteSync::Config.priority(table))}, #{connection.quote(table)}, 'S',
                t.`#{SiteSync::Config.pk(table)}`, #{uuid}, NULL, #{SiteSync::RowSql.json(table, 't.')},
                #{SiteSync::RowSql.hash_expr(table, 't.')}, 'local', 'rake:site_sync:snapshot', NOW(6)
         FROM `#{table}` t #{join}

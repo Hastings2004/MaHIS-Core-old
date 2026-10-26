@@ -4,17 +4,17 @@ module SiteSync
   # Rebuilds this site's data from central's backup copy (design section 8).
   #
   # Before this runs, an administrator freezes the site at central, which
-  # opens a new epoch and issues a new secret for the new server (the old
+  # opens a new server generation and issues a new secret for the new server (the old
   # server's secret stops working). Then, on the new server:
   #   1. the site is put in "restoring" mode (the API refuses requests)
   #   2. every synced table is downloaded in pages and written with its
   #      original local ids, so printed labels and lab orders stay valid. Each
   #      page is one multi-row insert, committed together with the restore's
   #      progress, so a restore interrupted by a power cut resumes where it
-  #      stopped (for the same epoch) instead of starting again
+  #      stopped (for the same server_generation) instead of starting again
   #   3. each table is checksummed and compared with central's manifest; a
   #      mismatching table is downloaded again from scratch
-  #   4. the site joins the new epoch, catches up on changes made elsewhere
+  #   4. the site joins the new server generation, catches up on changes made elsewhere
   #      during the restore, and opens for logins
   class Restore
     CHUNK = Integer(ENV.fetch('SITE_SYNC_RESTORE_CHUNK', 5000))
@@ -31,10 +31,10 @@ module SiteSync
     def run
       started = Time.now
       manifest = fetch('/api/v1/site_sync/restore/manifest')
-      @log.call("Restoring #{Config.site_code} into epoch #{manifest['epoch']}; " \
+      @log.call("Restoring #{Config.site_code} into server generation #{manifest['server_generation']}; " \
                 "central's copy is complete up to #{manifest['last_received_at'] || 'the start'}")
       State.set('mode', 'restoring')
-      progress = load_progress(manifest['epoch'])
+      progress = load_progress(manifest['server_generation'])
 
       Context.capture_paused do
         @conn.execute('SET FOREIGN_KEY_CHECKS = 0')
@@ -67,9 +67,9 @@ module SiteSync
       raise "Restore verification failed for: #{failed.join(', ')}. The site stays closed." if failed.any?
 
       @conn.transaction do
-        State.set('epoch', manifest['epoch'])
-        State.set('pull_cursor', manifest['restore_point_gseq'])
-        State.set('hlc', [State.get_i('hlc', 0), manifest['max_hlc'].to_i].max)
+        State.set('server_generation', manifest['server_generation'])
+        State.set('pull_cursor', manifest['restore_from_global_seq'])
+        State.set('change_time', [State.get_i('change_time', 0), manifest['max_change_time'].to_i].max)
       end
       complete = @client.post('/api/v1/site_sync/restore/complete',
                               { tables: @report['tables'].transform_values { |t| t['checksum_ok'] } })
@@ -86,7 +86,7 @@ module SiteSync
         @log.call("  catch-up pull failed (#{e.message}); the agent's next pull will catch up")
         :deferred
       end
-      @report.merge!('epoch' => manifest['epoch'], 'data_safe_up_to' => manifest['last_received_at'],
+      @report.merge!('server_generation' => manifest['server_generation'], 'data_safe_up_to' => manifest['last_received_at'],
                      'catch_up' => caught_up.to_s, 'seconds' => (Time.now - started).round(1))
       @log.call("Restore complete in #{@report['seconds']}s. Changes made after #{manifest['last_received_at']} " \
                 'had not reached central and must be re-entered from paper.')
@@ -105,17 +105,17 @@ module SiteSync
     # A replacement server may hold stale or partial data: start from nothing.
     def clear_local_data
       Config.table_names.reverse_each { |table| @conn.execute("DELETE FROM `#{table}`") }
-      %w[sync_change_log sync_batches sync_row_versions sync_pending_apply sync_quarantine_notices].each do |table|
+      %w[sync_change_log sync_batches sync_row_versions sync_waiting_changes sync_quarantine_notices].each do |table|
         @conn.execute("DELETE FROM #{table}")
       end
     end
 
-    # Progress of a restore into `epoch`: tables finished, and how far the
-    # current table got. A restore for an older epoch is not resumed.
-    def load_progress(epoch)
+    # Progress of a restore into `server_generation`: tables finished, and how far the
+    # current table got. A restore for an older server generation is not resumed.
+    def load_progress(server_generation)
       saved = JSON.parse(State.get('restore_progress', '').presence || '{}')
-      fresh = { 'epoch' => epoch, 'tables' => [], 'table' => nil, 'last_id' => 0 }
-      saved['epoch'] == epoch ? fresh.merge(saved) : fresh
+      fresh = { 'server_generation' => server_generation, 'tables' => [], 'table' => nil, 'last_id' => 0 }
+      saved['server_generation'] == server_generation ? fresh.merge(saved) : fresh
     end
 
     # Download one table, starting after `resume_from` (or from scratch).

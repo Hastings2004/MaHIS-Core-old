@@ -4,7 +4,7 @@
 #
 # class:            shared_identity -> any site may edit; resolved field by field
 #                   clinical        -> only the site that created the row may edit
-# lane:             critical batches are always sent before bulk batches
+# priority:             critical batches are always sent before bulk batches
 # patient_ref:      column holding the patient's person id ("self" = this row)
 # refs:             integer FK -> synced table; sent on the wire as the target's uuid
 # protected_fields: never auto-resolved when two sites change them concurrently
@@ -14,7 +14,7 @@ tables:
   person:
     pk: person_id
     class: shared_identity
-    lane: critical
+    priority: critical
     patient_ref: self
     protected_fields: [gender, birthdate, dead, death_date]
 
@@ -24,21 +24,21 @@ tables:
     # person's uuid.
     uuid_via: person
     class: shared_identity
-    lane: critical
+    priority: critical
     patient_ref: self
     refs: { patient_id: person }
 
   person_name:
     pk: person_name_id
     class: shared_identity
-    lane: critical
+    priority: critical
     patient_ref: person_id
     refs: { person_id: person }
 
   patient_identifier:
     pk: patient_identifier_id
     class: shared_identity
-    lane: critical
+    priority: critical
     patient_ref: patient_id
     refs: { patient_id: patient }
     protected_fields: [identifier]
@@ -46,14 +46,14 @@ tables:
   encounter:
     pk: encounter_id
     class: clinical
-    lane: bulk
+    priority: bulk
     patient_ref: patient_id
     refs: { patient_id: patient, provider_id: person }
 
   obs:
     pk: obs_id
     class: clinical
-    lane: bulk
+    priority: bulk
     patient_ref: person_id
     refs: { person_id: person, encounter_id: encounter, obs_group_id: obs }
 

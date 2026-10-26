@@ -11,21 +11,21 @@ module SiteSync
 
     def status
       unsent = @conn.select_all(<<~SQL).to_a
-        SELECT l.lane, COUNT(*) AS events, MIN(l.captured_at) AS oldest
+        SELECT l.priority, COUNT(*) AS events, MIN(l.captured_at) AS oldest
         FROM sync_change_log l LEFT JOIN sync_batches b ON b.id = l.batch_id
         WHERE l.batch_id IS NULL OR b.status <> 'acked'
-        GROUP BY l.lane
+        GROUP BY l.priority
       SQL
       oldest = unsent.map { |r| r['oldest'] }.compact.min
       {
         'site_time_us' => Hlc.now_us,
-        'epoch' => State.epoch,
+        'server_generation' => State.server_generation,
         'mode' => State.get('mode', 'normal'),
-        'backlog' => unsent.to_h { |r| [r['lane'], r['events'].to_i] },
+        'backlog' => unsent.to_h { |r| [r['priority'], r['events'].to_i] },
         'oldest_unsent_seconds' => oldest ? (Time.now - oldest).round : 0,
         'open_quarantine' => @conn.select_value("SELECT COUNT(*) FROM sync_quarantine_notices WHERE status = 'open'").to_i,
-        'pending_apply' => @conn.select_value('SELECT COUNT(*) FROM sync_pending_apply WHERE orphaned_at IS NULL').to_i,
-        'orphaned' => @conn.select_value('SELECT COUNT(*) FROM sync_pending_apply WHERE orphaned_at IS NOT NULL').to_i,
+        'pending_apply' => @conn.select_value('SELECT COUNT(*) FROM sync_waiting_changes WHERE orphaned_at IS NULL').to_i,
+        'orphaned' => @conn.select_value('SELECT COUNT(*) FROM sync_waiting_changes WHERE orphaned_at IS NOT NULL').to_i,
         'pull_cursor' => State.get_i('pull_cursor', 0),
         'triggers_installed' => installed_triggers.size,
         'triggers_expected' => TriggerGenerator.expected_trigger_names.size,

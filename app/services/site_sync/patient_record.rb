@@ -16,7 +16,7 @@ module SiteSync
 
       # Newer than anything already in the feed, so a feed event that arrives
       # after this snapshot cannot overwrite it with older data.
-      hlc = Central.next_hlc
+      change_time = Central.next_hlc
       Config.table_names.flat_map do |table|
         column = Config.patient_ref(table) == 'self' ? Config.pk(table) : Config.patient_ref(table)
         ids = @conn.select_values(
@@ -25,7 +25,7 @@ module SiteSync
         ids.map do |id|
           row = @store.current(table, id)
           uuid = Config.uuid_via(table) ? patient_uuid : row['uuid']
-          { 'table' => table, 'op' => 'I', 'uuid' => uuid, 'hlc' => hlc, 'row' => row,
+          { 'table' => table, 'operation' => 'I', 'uuid' => uuid, 'change_time' => change_time, 'row' => row,
             'refs' => @codec.encode_refs(table, row) }
         end
       end

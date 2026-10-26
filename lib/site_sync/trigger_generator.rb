@@ -34,7 +34,7 @@ module SiteSync
     # CREATE TRIGGER statements for one table (no DELIMITER; each statement is
     # sent to MySQL on its own).
     def create_sql(table)
-      OPS.map { |suffix, (event, op)| trigger(table, suffix, event, op) }
+      OPS.map { |suffix, (event, operation)| trigger(table, suffix, event, operation) }
     end
 
     def all_sql
@@ -61,14 +61,14 @@ module SiteSync
       Config.trigger_definer ? "DEFINER = #{Config.trigger_definer} " : ''
     end
 
-    def trigger(table, suffix, event, op)
-      row = op == 'D' ? 'OLD.' : 'NEW.'
-      after = op == 'D' ? 'NULL' : RowSql.json(table, 'NEW.')
-      before = op == 'I' ? 'NULL' : RowSql.json(table, 'OLD.')
-      row_hash = op == 'D' ? 'NULL' : 'SHA2(CAST(v_after AS CHAR), 256)'
+    def trigger(table, suffix, event, operation)
+      row = operation == 'D' ? 'OLD.' : 'NEW.'
+      after = operation == 'D' ? 'NULL' : RowSql.json(table, 'NEW.')
+      before = operation == 'I' ? 'NULL' : RowSql.json(table, 'OLD.')
+      row_hash = operation == 'D' ? 'NULL' : 'SHA2(CAST(v_after AS CHAR), 256)'
       # An UPDATE that changes nothing (Rails sometimes saves unchanged rows)
       # is not worth syncing.
-      skip_unchanged = op == 'U' ? ' AND NOT (v_after <=> v_before)' : ''
+      skip_unchanged = operation == 'U' ? ' AND NOT (v_after <=> v_before)' : ''
 
       <<~SQL.strip
         CREATE #{definer_clause}TRIGGER `#{trigger_name(table, suffix)}` AFTER #{event} ON `#{table}` FOR EACH ROW
@@ -80,10 +80,10 @@ module SiteSync
             SET v_before = #{before};
             IF TRUE#{skip_unchanged} THEN
               INSERT INTO sync_change_log
-                (lane, table_name, op, row_pk, row_uuid, before_json, after_json, row_hash,
-                 origin, request_id, endpoint, job, user_uuid, captured_at)
+                (priority, table_name, operation, local_id, row_uuid, before_json, after_json, row_hash,
+                 source, request_id, endpoint, job, user_uuid, captured_at)
               VALUES
-                ('#{Config.lane(table)}', '#{table}', '#{op}', #{row}`#{Config.pk(table)}`, #{RowSql.uuid(table, row)},
+                ('#{Config.priority(table)}', '#{table}', '#{operation}', #{row}`#{Config.pk(table)}`, #{RowSql.uuid(table, row)},
                  v_before, v_after, #{row_hash},
                  COALESCE(@sync_origin, 'local'), @sync_request_id, @sync_endpoint, @sync_job, @sync_user_uuid, NOW(6));
             END IF;

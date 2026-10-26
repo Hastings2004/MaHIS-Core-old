@@ -85,7 +85,7 @@ module Api
             return render json: { status: 'refused', error: 'stale_request' }, status: :unauthorized
           end
           connection.execute(<<~SQL)
-            INSERT INTO sync_request_nonces (nonce, site_code, site_timestamp, seen_at)
+            INSERT INTO sync_request_nonces (nonce, site_code, signed_at_us, seen_at)
             VALUES (#{q(nonce)}, #{q(site_code)}, #{q(timestamp.to_i)}, NOW(6))
           SQL
         rescue ActiveRecord::RecordNotUnique

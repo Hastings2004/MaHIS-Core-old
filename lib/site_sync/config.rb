@@ -48,8 +48,8 @@ module SiteSync
       table(name).fetch('pk')
     end
 
-    def lane(name)
-      table(name).fetch('lane')
+    def priority(name)
+      table(name).fetch('priority')
     end
 
     def table_class(name)

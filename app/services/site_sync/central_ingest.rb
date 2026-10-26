@@ -7,7 +7,7 @@ module SiteSync
   #
   # Order of checks (design section 5):
   #   1. site signature (controller) and batch hash
-  #   2. epoch and sequence continuity / hash chain
+  #   2. server generation and batch-number continuity / hash chain
   #   3. schema version, clock
   #   4. field types and required values
   #   5. ownership
@@ -36,10 +36,10 @@ module SiteSync
 
       return refuse(400, 'site_mismatch') unless header['site'] == @site_code
 
-      computed = Digest::SHA256.hexdigest("#{header['prev_hash']}#{events_json}")
+      computed = Digest::SHA256.hexdigest("#{header['previous_batch_hash']}#{events_json}")
       unless computed == header['batch_hash']
         Central.alert(@site_code, 'batch_tampered',
-                      "Batch #{header['lane']}##{header['seq']} does not match its own hash: changed after sealing")
+                      "Batch #{header['priority']}##{header['batch_number']} does not match its own hash: changed after sealing")
         return refuse(400, 'batch_hash_mismatch')
       end
 
@@ -69,7 +69,7 @@ module SiteSync
         current = queue.shift
         next unless seen.add?(current['id'])
 
-        event = JSON.parse(current['event_json'])
+        event = JSON.parse(current['change_json'])
         begin
           @conn.transaction(requires_new: true) { apply(event) }
           @conn.execute(<<~SQL)
@@ -94,39 +94,39 @@ module SiteSync
       @conn.select_all(<<~SQL).to_a
         SELECT * FROM sync_quarantine
         WHERE site_code = #{q(@site_code)} AND status = 'open' #{reasons}
-          AND (parent_uuid = #{q(uuid)} #{siblings})
+          AND (waiting_for_uuid = #{q(uuid)} #{siblings})
         ORDER BY id
       SQL
     end
 
     def ingest(header, events_json)
       site = Central.site(@site_code)
-      if header['epoch'].to_i != site['epoch'].to_i
+      if header['server_generation'].to_i != site['server_generation'].to_i
         Central.alert(@site_code, 'stale_epoch',
-                      "Refused batch from epoch #{header['epoch']}; current epoch is #{site['epoch']}. " \
+                      "Refused batch from server generation #{header['server_generation']}; current server generation is #{site['server_generation']}. " \
                       'An old or cloned server may be running.')
-        return refuse(409, 'stale_epoch', current_epoch: site['epoch'].to_i)
+        return refuse(409, 'stale_epoch', current_epoch: site['server_generation'].to_i)
       end
       return refuse(423, 'site_not_active', status: site['status']) unless site['status'] == 'active'
 
-      lane = lane_state(header['epoch'], header['lane'])
-      seq = header['seq'].to_i
+      priority = lane_state(header['server_generation'], header['priority'])
+      batch_number = header['batch_number'].to_i
 
-      if seq <= lane[:committed_seq]
+      if batch_number <= priority[:last_batch_number]
         stored = @conn.select_one(<<~SQL)
-          SELECT batch_hash, ack_json FROM sync_received_batches
-          WHERE site_code = #{q(@site_code)} AND epoch = #{header['epoch'].to_i}
-            AND lane = #{q(header['lane'])} AND seq = #{seq}
+          SELECT batch_hash, central_reply_json FROM sync_received_batches
+          WHERE site_code = #{q(@site_code)} AND server_generation = #{header['server_generation'].to_i}
+            AND priority = #{q(header['priority'])} AND batch_number = #{batch_number}
         SQL
-        return Result.new(200, JSON.parse(stored['ack_json']).merge('duplicate' => true)) if stored && stored['batch_hash'] == header['batch_hash']
+        return Result.new(200, JSON.parse(stored['central_reply_json']).merge('duplicate' => true)) if stored && stored['batch_hash'] == header['batch_hash']
 
-        return refuse(409, 'batch_hash_conflict', expected_seq: lane[:committed_seq] + 1)
+        return refuse(409, 'batch_hash_conflict', expected_seq: priority[:last_batch_number] + 1)
       end
-      return refuse(409, 'sequence_gap', expected_seq: lane[:committed_seq] + 1) if seq != lane[:committed_seq] + 1
+      return refuse(409, 'sequence_gap', expected_seq: priority[:last_batch_number] + 1) if batch_number != priority[:last_batch_number] + 1
 
-      unless header['prev_hash'] == lane[:last_batch_hash]
-        Central.alert(@site_code, 'chain_broken', "Batch #{header['lane']}##{seq} does not chain to the last accepted batch")
-        return refuse(409, 'chain_broken', expected_seq: lane[:committed_seq] + 1)
+      unless header['previous_batch_hash'] == priority[:last_batch_hash]
+        Central.alert(@site_code, 'chain_broken', "Batch #{header['priority']}##{batch_number} does not chain to the last accepted batch")
+        return refuse(409, 'chain_broken', expected_seq: priority[:last_batch_number] + 1)
       end
 
       events = JSON.parse(events_json)
@@ -136,15 +136,15 @@ module SiteSync
       # capped events cannot win a conflict automatically (resolve_fields).
       central_now = Hlc.now_us
       limit = central_now + Config.max_clock_ahead_us
-      clamped = events.count { |e| e['hlc'].to_i > limit }
+      clamped = events.count { |e| e['change_time'].to_i > limit }
       if clamped.positive?
         events.each do |e|
-          next unless e['hlc'].to_i > limit
+          next unless e['change_time'].to_i > limit
 
-          e['site_hlc'] = e['hlc']
+          e['site_change_time'] = e['change_time']
           # Central's real time, not time + margin: a field version stamped
           # ahead would make genuine edits from other sites lose for minutes.
-          e['hlc'] = central_now
+          e['change_time'] = central_now
           e['clock_clamped'] = true
         end
         Central.alert(@site_code, 'clock_ahead',
@@ -156,17 +156,17 @@ module SiteSync
       @conn.transaction do
         outcome = apply_events(events)
         ack = {
-          'status' => 'ok', 'lane' => header['lane'], 'committed_seq' => seq, 'batch_hash' => header['batch_hash'],
+          'status' => 'ok', 'priority' => header['priority'], 'last_batch_number' => batch_number, 'batch_hash' => header['batch_hash'],
           'quarantined' => outcome[:quarantined], 'resolved' => outcome[:resolved], 'central_time_us' => Hlc.now_us
         }
         @conn.execute(<<~SQL)
-          INSERT INTO sync_received_batches (site_code, epoch, lane, seq, batch_hash, event_count, ack_json, received_at)
-          VALUES (#{q(@site_code)}, #{header['epoch'].to_i}, #{q(header['lane'])}, #{seq}, #{q(header['batch_hash'])},
+          INSERT INTO sync_received_batches (site_code, server_generation, priority, batch_number, batch_hash, change_count, central_reply_json, received_at)
+          VALUES (#{q(@site_code)}, #{header['server_generation'].to_i}, #{q(header['priority'])}, #{batch_number}, #{q(header['batch_hash'])},
                   #{events.size}, #{q(ack.to_json)}, NOW(6))
         SQL
         @conn.execute(<<~SQL)
-          UPDATE sync_site_lanes SET committed_seq = #{seq}, last_batch_hash = #{q(header['batch_hash'])}, updated_at = NOW(6)
-          WHERE site_code = #{q(@site_code)} AND epoch = #{header['epoch'].to_i} AND lane = #{q(header['lane'])}
+          UPDATE sync_site_progress SET last_batch_number = #{batch_number}, last_batch_hash = #{q(header['batch_hash'])}, updated_at = NOW(6)
+          WHERE site_code = #{q(@site_code)} AND server_generation = #{header['server_generation'].to_i} AND priority = #{q(header['priority'])}
         SQL
         simulate_power_cut!
       end
@@ -188,16 +188,16 @@ module SiteSync
       raise 'Simulated power cut before COMMIT'
     end
 
-    def lane_state(epoch, lane)
+    def lane_state(server_generation, priority)
       @conn.execute(<<~SQL)
-        INSERT IGNORE INTO sync_site_lanes (site_code, epoch, lane, committed_seq, last_batch_hash, updated_at)
-        VALUES (#{q(@site_code)}, #{epoch.to_i}, #{q(lane)}, 0, #{q(GENESIS)}, NOW(6))
+        INSERT IGNORE INTO sync_site_progress (site_code, server_generation, priority, last_batch_number, last_batch_hash, updated_at)
+        VALUES (#{q(@site_code)}, #{server_generation.to_i}, #{q(priority)}, 0, #{q(GENESIS)}, NOW(6))
       SQL
       row = @conn.select_one(<<~SQL)
-        SELECT committed_seq, last_batch_hash FROM sync_site_lanes
-        WHERE site_code = #{q(@site_code)} AND epoch = #{epoch.to_i} AND lane = #{q(lane)}
+        SELECT last_batch_number, last_batch_hash FROM sync_site_progress
+        WHERE site_code = #{q(@site_code)} AND server_generation = #{server_generation.to_i} AND priority = #{q(priority)}
       SQL
-      { committed_seq: row['committed_seq'].to_i, last_batch_hash: row['last_batch_hash'] }
+      { last_batch_number: row['last_batch_number'].to_i, last_batch_hash: row['last_batch_hash'] }
     end
 
     # ---------------------------------------------------------------------
@@ -205,23 +205,23 @@ module SiteSync
     def apply_events(events)
       events.each { |event| update_mirror(event) }
 
-      own = events.reject { |e| e['origin'] == 'replica' }
+      own = events.reject { |e| e['source'] == 'replica' }
       problems = validate(own)
       quarantined = []
       resolved = []
       new_person_uuids = []
 
       own.each do |event|
-        if (problem = problems[event['event_id']])
+        if (problem = problems[event['change_key']])
           quarantine(event, problem)
-          quarantined << { 'event_id' => event['event_id'], 'table' => event['table'], 'uuid' => event['uuid'],
+          quarantined << { 'change_key' => event['change_key'], 'table' => event['table'], 'uuid' => event['uuid'],
                            'reason' => problem[:reason], 'details' => problem[:details] }
           next
         end
 
         begin
           @conn.transaction(requires_new: true) { apply(event) }
-          new_person_uuids << event['uuid'] if event['table'] == 'person' && event['op'] == 'I'
+          new_person_uuids << event['uuid'] if event['table'] == 'person' && event['operation'] == 'I'
           fixed_requests = resolve_quarantine(event['uuid'])
           resolved << event['uuid'] if fixed_requests
           # The record is here now (it arrived late, or the site corrected
@@ -232,12 +232,12 @@ module SiteSync
         rescue Codec::MissingRef => e
           problem = { reason: 'missing_reference', details: e.message, parent: e.uuid }
           quarantine(event, problem)
-          quarantined << { 'event_id' => event['event_id'], 'table' => event['table'], 'uuid' => event['uuid'],
+          quarantined << { 'change_key' => event['change_key'], 'table' => event['table'], 'uuid' => event['uuid'],
                            'reason' => problem[:reason], 'details' => problem[:details] }
         rescue ActiveRecord::StatementInvalid => e
           problem = { reason: 'database_rejected', details: e.message.slice(0, 500) }
           quarantine(event, problem)
-          quarantined << { 'event_id' => event['event_id'], 'table' => event['table'], 'uuid' => event['uuid'],
+          quarantined << { 'change_key' => event['change_key'], 'table' => event['table'], 'uuid' => event['uuid'],
                            'reason' => problem[:reason], 'details' => problem[:details] }
         end
       end
@@ -251,20 +251,20 @@ module SiteSync
     # event goes in, quarantined or not: quarantine is about the national
     # dataset, not about what the site holds.
     def update_mirror(event)
-      if event['op'] == 'D'
+      if event['operation'] == 'D'
         @conn.execute(<<~SQL)
-          UPDATE sync_site_mirror SET deleted = 1, hlc = #{event['hlc'].to_i}, updated_at = NOW(6)
+          UPDATE sync_site_backup SET deleted = 1, change_time = #{event['change_time'].to_i}, updated_at = NOW(6)
           WHERE site_code = #{q(@site_code)} AND table_name = #{q(event['table'])} AND row_uuid = #{q(event['uuid'])}
         SQL
         return
       end
 
       @conn.execute(<<~SQL)
-        INSERT INTO sync_site_mirror (site_code, table_name, row_uuid, local_id, row_json, row_hash, hlc, deleted, updated_at)
+        INSERT INTO sync_site_backup (site_code, table_name, row_uuid, local_id, row_json, row_hash, change_time, deleted, updated_at)
         VALUES (#{q(@site_code)}, #{q(event['table'])}, #{q(event['uuid'])}, #{event['pk'].to_i},
-                #{q(event['row'].to_json)}, #{q(event['row_hash'])}, #{event['hlc'].to_i}, 0, NOW(6))
+                #{q(event['row'].to_json)}, #{q(event['row_hash'])}, #{event['change_time'].to_i}, 0, NOW(6))
         ON DUPLICATE KEY UPDATE local_id = VALUES(local_id), row_json = VALUES(row_json), row_hash = VALUES(row_hash),
-                                hlc = VALUES(hlc), deleted = 0, updated_at = VALUES(updated_at)
+                                change_time = VALUES(change_time), deleted = 0, updated_at = VALUES(updated_at)
       SQL
     end
 
@@ -277,8 +277,8 @@ module SiteSync
       events.each do |event|
         problem = check(event, created)
         if problem
-          problems[event['event_id']] = problem
-        elsif %w[I S R].include?(event['op'])
+          problems[event['change_key']] = problem
+        elsif %w[I S R].include?(event['operation'])
           created[event['table']] << event['uuid']
         end
       end
@@ -286,20 +286,20 @@ module SiteSync
       # Park whatever depends on a quarantined row, and everything else saved
       # by the same API request, until nothing changes.
       loop do
-        bad_uuids = events.select { |e| problems[e['event_id']] }.map { |e| e['uuid'] }.to_set
-        bad_requests = events.select { |e| problems[e['event_id']] && e['request_id'] }.map { |e| e['request_id'] }.to_set
+        bad_uuids = events.select { |e| problems[e['change_key']] }.map { |e| e['uuid'] }.to_set
+        bad_requests = events.select { |e| problems[e['change_key']] && e['request_id'] }.map { |e| e['request_id'] }.to_set
         added = false
         events.each do |event|
-          next if problems[event['event_id']]
+          next if problems[event['change_key']]
 
           parent = (event['refs'] || {}).values.find { |uuid| uuid && bad_uuids.include?(uuid) }
           if parent
-            problems[event['event_id']] = { reason: 'parent_quarantined', details: "depends on #{parent}", parent: }
+            problems[event['change_key']] = { reason: 'parent_quarantined', details: "depends on #{parent}", parent: }
           elsif event['request_id'] && bad_requests.include?(event['request_id'])
-            problems[event['event_id']] = { reason: 'request_parked',
+            problems[event['change_key']] = { reason: 'request_parked',
                                             details: "saved by the same request (#{event['request_id']}) as a quarantined record" }
           end
-          added ||= problems.key?(event['event_id'])
+          added ||= problems.key?(event['change_key'])
         end
         break unless added
       end
@@ -309,9 +309,9 @@ module SiteSync
     def check(event, created)
       table = event['table']
       return { reason: 'unknown_table', details: table } unless Config.synced?(table)
-      return { reason: 'invalid_operation', details: event['op'] } unless %w[I U D S R].include?(event['op'])
+      return { reason: 'invalid_operation', details: event['operation'] } unless %w[I U D S R].include?(event['operation'])
       return { reason: 'invalid_uuid', details: event['uuid'].inspect } unless event['uuid'].to_s.match?(/\A[0-9a-fA-F-]{32,38}\z/)
-      return nil if event['op'] == 'D'
+      return nil if event['operation'] == 'D'
 
       row = event['row'] || {}
       refs = event['refs'] || {}
@@ -325,7 +325,7 @@ module SiteSync
         owner = @conn.select_value(
           "SELECT site_code FROM sync_row_owners WHERE table_name = #{q(table)} AND row_uuid = #{q(event['uuid'])}"
         )
-        if owner && owner != @site_code && event['op'] != 'S'
+        if owner && owner != @site_code && event['operation'] != 'S'
           return { reason: 'ownership', details: "#{table} #{event['uuid']} belongs to #{owner}; ask #{owner} to void it" }
         end
       end
@@ -394,15 +394,15 @@ module SiteSync
       uuid = event['uuid']
       id = @codec.id_for(table, uuid)
 
-      if event['op'] == 'D'
+      if event['operation'] == 'D'
         return unless id
 
         @conn.execute(<<~SQL)
           INSERT INTO sync_deleted_records (site_code, table_name, row_uuid, row_json, deleted_at)
           VALUES (#{q(@site_code)}, #{q(table)}, #{q(uuid)}, #{q(@store.current(table, id).to_json)}, NOW(6))
         SQL
-        Central.publish(table:, op: 'D', uuid:, origin_site: @site_code, codec: @codec, store: @store,
-                        seen_hlc: event['hlc'].to_i)
+        Central.publish(table:, operation: 'D', uuid:, from_site: @site_code, codec: @codec, store: @store,
+                        seen_change_time: event['change_time'].to_i)
         @store.delete(table, id)
         @codec.forget(table, uuid)
         return
@@ -418,8 +418,8 @@ module SiteSync
         SQL
         record_versions(table, uuid, local.keys, event)
         Central.subscribe(@site_code, uuid, 'own') if table == 'person'
-        Central.publish(table:, op: 'I', uuid:, origin_site: @site_code, codec: @codec, store: @store,
-                        seen_hlc: event['hlc'].to_i)
+        Central.publish(table:, operation: 'I', uuid:, from_site: @site_code, codec: @codec, store: @store,
+                        seen_change_time: event['change_time'].to_i)
         return
       end
 
@@ -431,14 +431,14 @@ module SiteSync
       changes, lost = Config.clinical?(table) ? [differing(local, current), false] : resolve_fields(event, local, current)
       @store.update(table, id, changes)
       if changes.any?
-        Central.publish(table:, op: 'U', uuid:, origin_site: @site_code, codec: @codec, store: @store,
-                        seen_hlc: event['hlc'].to_i, columns: changes.keys)
+        Central.publish(table:, operation: 'U', uuid:, from_site: @site_code, codec: @codec, store: @store,
+                        seen_change_time: event['change_time'].to_i, columns: changes.keys)
       end
       # The site's own copy still holds a value that lost; send it the winner.
       return unless lost
 
-      Central.publish(table:, op: 'U', uuid:, origin_site: @site_code, target_site: @site_code, codec: @codec,
-                      store: @store, seen_hlc: event['hlc'].to_i)
+      Central.publish(table:, operation: 'U', uuid:, from_site: @site_code, for_site: @site_code, codec: @codec,
+                      store: @store, seen_change_time: event['change_time'].to_i)
     end
 
     def differing(local, current)
@@ -459,24 +459,24 @@ module SiteSync
       lost = false
       # An update only speaks for the columns the site actually changed; the
       # rest of its row may simply be out of date.
-      if event['op'] == 'U'
+      if event['operation'] == 'U'
         edited = (event['row'] || {}).keys.reject { |col| same?(before[col], event['row'][col]) }
         local = local.slice(*edited)
       end
 
       differing(local, current).each do |col, value|
         version = @conn.select_one(<<~SQL)
-          SELECT hlc, site_code FROM sync_field_versions
+          SELECT change_time, site_code FROM sync_field_versions
           WHERE table_name = #{q(table)} AND row_uuid = #{q(event['uuid'])} AND column_name = #{q(col)}
         SQL
-        based_on_current = if event['op'] == 'U' && !ref_cols.include?(col)
+        based_on_current = if event['operation'] == 'U' && !ref_cols.include?(col)
                              same?(before[col], current[col])
                            else
                              version.nil? || version['site_code'] == @site_code
                            end
 
-        incoming = [value, @site_code, event['hlc'].to_i]
-        existing = [current[col], version&.fetch('site_code'), version&.fetch('hlc')&.to_i]
+        incoming = [value, @site_code, event['change_time'].to_i]
+        existing = [current[col], version&.fetch('site_code'), version&.fetch('change_time')&.to_i]
         if based_on_current
           changes[col] = value
         elsif Config.protected_fields(table).include?(col) || event['clock_clamped']
@@ -484,7 +484,7 @@ module SiteSync
           # to a data officer instead of last-writer-wins.
           conflict(table, event['uuid'], col, 'protected', kept: existing, losing: incoming)
           lost = true
-        elsif version.nil? || event['hlc'].to_i > version['hlc'].to_i
+        elsif version.nil? || event['change_time'].to_i > version['change_time'].to_i
           changes[col] = value
           conflict(table, event['uuid'], col, 'lww', kept: incoming, losing: existing)
         else
@@ -496,27 +496,27 @@ module SiteSync
       [changes, lost]
     end
 
-    # kept / losing: [value, site_code, hlc]. Protected-field conflicts stay
+    # kept / losing: [value, site_code, change_time]. Protected-field conflicts stay
     # open for a data officer; last-writer-wins ones are only logged.
-    def conflict(table, uuid, col, kind, kept:, losing:)
+    def conflict(table, uuid, col, conflict_type, kept:, losing:)
       @conn.execute(<<~SQL)
         INSERT INTO sync_conflicts
-          (table_name, row_uuid, column_name, kind, kept_value, kept_site, kept_hlc, losing_value, losing_site, losing_hlc,
+          (table_name, row_uuid, column_name, conflict_type, kept_value, kept_site, kept_change_time, losing_value, losing_site, losing_change_time,
            status, created_at)
-        VALUES (#{q(table)}, #{q(uuid)}, #{q(col)}, #{q(kind)}, #{q(kept[0]&.to_s)}, #{q(kept[1])}, #{q(kept[2])},
+        VALUES (#{q(table)}, #{q(uuid)}, #{q(col)}, #{q(conflict_type)}, #{q(kept[0]&.to_s)}, #{q(kept[1])}, #{q(kept[2])},
                 #{q(losing[0]&.to_s)}, #{q(losing[1])}, #{q(losing[2])},
-                #{q(kind == 'protected' ? 'open' : 'logged')}, NOW(6))
+                #{q(conflict_type == 'protected' ? 'open' : 'logged')}, NOW(6))
       SQL
     end
 
     def record_versions(table, uuid, cols, event)
       return if Config.clinical?(table) || cols.empty?
 
-      values = cols.map { |col| "(#{q(table)}, #{q(uuid)}, #{q(col)}, #{event['hlc'].to_i}, #{q(@site_code)})" }
+      values = cols.map { |col| "(#{q(table)}, #{q(uuid)}, #{q(col)}, #{event['change_time'].to_i}, #{q(@site_code)})" }
       @conn.execute(<<~SQL)
-        INSERT INTO sync_field_versions (table_name, row_uuid, column_name, hlc, site_code)
+        INSERT INTO sync_field_versions (table_name, row_uuid, column_name, change_time, site_code)
         VALUES #{values.join(', ')}
-        ON DUPLICATE KEY UPDATE hlc = VALUES(hlc), site_code = VALUES(site_code)
+        ON DUPLICATE KEY UPDATE change_time = VALUES(change_time), site_code = VALUES(site_code)
       SQL
     end
 
@@ -532,8 +532,8 @@ module SiteSync
     def quarantine(event, problem)
       @conn.execute(<<~SQL)
         INSERT INTO sync_quarantine
-          (site_code, event_id, table_name, row_uuid, request_id, reason, details, parent_uuid, event_json, status, created_at)
-        VALUES (#{q(@site_code)}, #{q(event['event_id'])}, #{q(event['table'])}, #{q(event['uuid'])}, #{q(event['request_id'])},
+          (site_code, change_key, table_name, row_uuid, request_id, reason, details, waiting_for_uuid, change_json, status, created_at)
+        VALUES (#{q(@site_code)}, #{q(event['change_key'])}, #{q(event['table'])}, #{q(event['uuid'])}, #{q(event['request_id'])},
                 #{q(problem[:reason])}, #{q(problem[:details])}, #{q(problem[:parent])}, #{q(event.to_json)}, 'open', NOW(6))
         ON DUPLICATE KEY UPDATE reason = VALUES(reason), details = VALUES(details), status = 'open'
       SQL
@@ -544,7 +544,7 @@ module SiteSync
     # nil if the row had nothing open.
     def resolve_quarantine(uuid)
       open = @conn.select_rows(<<~SQL)
-        SELECT event_id, request_id FROM sync_quarantine
+        SELECT change_key, request_id FROM sync_quarantine
         WHERE site_code = #{q(@site_code)} AND row_uuid = #{q(uuid)} AND status = 'open'
       SQL
       return nil if open.empty?

@@ -25,7 +25,7 @@ module SiteSync
 
         items = response.body['events']
         @conn.transaction do
-          items.each { |item| apply_one(item['event'], item['gseq']) }
+          items.each { |item| apply_one(item['event'], item['global_seq']) }
           State.set('pull_cursor', response.body['next_cursor'])
         end
         applied ||= items.any?
@@ -48,7 +48,7 @@ module SiteSync
         response.body['events'].each { |event| apply_one(event, nil) }
       end
       retry_pending
-      response.body.slice('patient_uuid', 'event_count')
+      response.body.slice('patient_uuid', 'change_count')
     end
 
     # A parked row whose parent never arrives is not retried forever: after
@@ -58,15 +58,15 @@ module SiteSync
     MAX_PENDING_DAYS = 7
 
     def retry_pending
-      @conn.select_all('SELECT * FROM sync_pending_apply WHERE orphaned_at IS NULL ORDER BY id').to_a.each do |row|
+      @conn.select_all('SELECT * FROM sync_waiting_changes WHERE orphaned_at IS NULL ORDER BY id').to_a.each do |row|
         @conn.transaction(requires_new: true) do
-          @applier.apply(JSON.parse(row['event_json']))
-          @conn.execute("DELETE FROM sync_pending_apply WHERE id = #{row['id']}")
+          @applier.apply(JSON.parse(row['change_json']))
+          @conn.execute("DELETE FROM sync_waiting_changes WHERE id = #{row['id']}")
           @stats[:pending_applied] += 1
         end
       rescue Codec::MissingRef, ActiveRecord::StatementInvalid => e
         @conn.execute(<<~SQL)
-          UPDATE sync_pending_apply
+          UPDATE sync_waiting_changes
           SET attempts = attempts + 1, last_error = #{@conn.quote(e.message.slice(0, 500))},
               orphaned_at = IF(attempts >= #{MAX_PENDING_ATTEMPTS}
                                OR created_at < NOW(6) - INTERVAL #{MAX_PENDING_DAYS} DAY, NOW(6), NULL)
@@ -77,7 +77,7 @@ module SiteSync
 
     private
 
-    def apply_one(event, gseq)
+    def apply_one(event, global_seq)
       @conn.transaction(requires_new: true) do
         @stats[@applier.apply(event)] += 1
       end
@@ -85,8 +85,8 @@ module SiteSync
       # Its parent row has not arrived yet (or is held in quarantine at
       # central): park it and retry after every pull.
       @conn.execute(<<~SQL)
-        INSERT INTO sync_pending_apply (gseq, table_name, row_uuid, event_json, attempts, last_error, created_at)
-        VALUES (#{@conn.quote(gseq)}, #{@conn.quote(event['table'])}, #{@conn.quote(event['uuid'])},
+        INSERT INTO sync_waiting_changes (global_seq, table_name, row_uuid, change_json, attempts, last_error, created_at)
+        VALUES (#{@conn.quote(global_seq)}, #{@conn.quote(event['table'])}, #{@conn.quote(event['uuid'])},
                 #{@conn.quote(event.to_json)}, 1, #{@conn.quote(e.message.slice(0, 500))}, NOW(6))
       SQL
       @stats[:parked] += 1

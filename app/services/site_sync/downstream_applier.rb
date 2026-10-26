@@ -21,16 +21,16 @@ module SiteSync
     def apply(event)
       table = event['table']
       uuid = event['uuid']
-      hlc = event['hlc'].to_i
+      change_time = event['change_time'].to_i
       seen = @conn.select_value(
-        "SELECT hlc FROM sync_row_versions WHERE table_name = #{q(table)} AND row_uuid = #{q(uuid)}"
+        "SELECT change_time FROM sync_row_versions WHERE table_name = #{q(table)} AND row_uuid = #{q(uuid)}"
       )
-      return :stale if seen && seen.to_i >= hlc
+      return :stale if seen && seen.to_i >= change_time
 
       result = Context.as_replica { write(table, uuid, event) }
       @conn.execute(<<~SQL)
-        INSERT INTO sync_row_versions (table_name, row_uuid, hlc, site_code) VALUES (#{q(table)}, #{q(uuid)}, #{hlc}, 'central')
-        ON DUPLICATE KEY UPDATE hlc = VALUES(hlc)
+        INSERT INTO sync_row_versions (table_name, row_uuid, change_time, site_code) VALUES (#{q(table)}, #{q(uuid)}, #{change_time}, 'central')
+        ON DUPLICATE KEY UPDATE change_time = VALUES(change_time)
       SQL
       result
     end
@@ -39,7 +39,7 @@ module SiteSync
 
     def write(table, uuid, event)
       id = @codec.id_for(table, uuid)
-      if event['op'] == 'D'
+      if event['operation'] == 'D'
         @store.delete(table, id) if id
         @codec.forget(table, uuid)
         return :applied
@@ -50,7 +50,7 @@ module SiteSync
       if id.nil?
         # An update carries only the changed columns; without the row there
         # is nothing to apply it to yet (it is parked until the row arrives).
-        raise Codec::MissingRef.new(table, uuid, 'row') if event['op'] == 'U'
+        raise Codec::MissingRef.new(table, uuid, 'row') if event['operation'] == 'U'
 
         @store.insert(table, local)
         return :applied
@@ -71,12 +71,12 @@ module SiteSync
     # acknowledged; :all if the row itself was created locally and is unsent.
     def pending_columns(table, uuid)
       rows = @conn.select_all(<<~SQL).to_a
-        SELECT l.op, l.before_json, l.after_json FROM sync_change_log l
+        SELECT l.operation, l.before_json, l.after_json FROM sync_change_log l
         LEFT JOIN sync_batches b ON b.id = l.batch_id
-        WHERE l.table_name = #{q(table)} AND l.row_uuid = #{q(uuid)} AND l.origin = 'local'
+        WHERE l.table_name = #{q(table)} AND l.row_uuid = #{q(uuid)} AND l.source = 'local'
           AND (l.batch_id IS NULL OR b.status <> 'acked')
       SQL
-      return :all if rows.any? { |r| r['op'] == 'I' }
+      return :all if rows.any? { |r| r['operation'] == 'I' }
 
       rows.each_with_object(Set.new) do |r, cols|
         before = r['before_json'] ? JSON.parse(r['before_json']) : {}

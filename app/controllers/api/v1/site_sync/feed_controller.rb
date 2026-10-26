@@ -8,7 +8,7 @@ module Api
         HYDRATE_REASONS = %w[referral transfer national_id_lookup].freeze
         HYDRATE_PER_HOUR = Integer(ENV.fetch('SITE_SYNC_HYDRATE_PER_HOUR', 200))
 
-        # GET /api/v1/site_sync/changes?cursor=<gseq>&limit=<n>
+        # GET /api/v1/site_sync/changes?cursor=<global_seq>&limit=<n>
         # Changes after the cursor for patients this site follows, plus
         # corrections addressed to it; never the site's own changes.
         def changes
@@ -18,21 +18,21 @@ module Api
           next_cursor = nil
           connection.transaction(isolation: :repeatable_read) do
             rows = connection.select_all(<<~SQL).to_a
-              SELECT l.gseq, l.event_json FROM sync_central_log l
-              WHERE l.gseq > #{cursor}
-                AND (l.target_site = #{q(site_code)}
-                     OR (l.target_site IS NULL AND l.origin_site <> #{q(site_code)}
+              SELECT l.global_seq, l.change_json FROM sync_central_feed l
+              WHERE l.global_seq > #{cursor}
+                AND (l.for_site = #{q(site_code)}
+                     OR (l.for_site IS NULL AND l.from_site <> #{q(site_code)}
                          AND l.patient_uuid IN (SELECT s.patient_uuid FROM sync_subscriptions s
                                                 WHERE s.site_code = #{q(site_code)})))
-              ORDER BY l.gseq LIMIT #{limit}
+              ORDER BY l.global_seq LIMIT #{limit}
             SQL
-            events = rows.map { |r| { 'gseq' => r['gseq'], 'event' => JSON.parse(r['event_json']) } }
+            events = rows.map { |r| { 'global_seq' => r['global_seq'], 'event' => JSON.parse(r['change_json']) } }
             # Short page: everything up to the newest committed change has been
             # seen, matching or not, so the cursor can jump to it.
             next_cursor = if rows.size == limit
-                            rows.last['gseq']
+                            rows.last['global_seq']
                           else
-                            [connection.select_value('SELECT COALESCE(MAX(gseq), 0) FROM sync_central_log').to_i, cursor].max
+                            [connection.select_value('SELECT COALESCE(MAX(global_seq), 0) FROM sync_central_feed').to_i, cursor].max
                           end
           end
           render json: { events:, next_cursor: }
@@ -62,7 +62,7 @@ module Api
               ::SiteSync::PatientRecord.new(connection).events(uuid)
             end
           end
-          render json: { patient_uuid: uuid, event_count: events.size, events: }
+          render json: { patient_uuid: uuid, change_count: events.size, events: }
         end
 
         private
