@@ -8,7 +8,7 @@
   :root {
     --bg: #f6f7f5; --surface: #ffffff; --surface-2: #eef0ed; --fg: #12171a; --muted: #5b6b66;
     --line: #dde3df; --accent: #0e7c6b; --accent-soft: #d9efe9;
-    --ok: #1a8f4c; --warn: #b4790a; --danger: #c4372b; --correction: #7c3fd4;
+    --ok: #1a8f4c; --warn: #b4790a; --danger: #c4372b; --correction: #7c3fd4; --pull: #1d6fd1;
     --font-display: 'IBM Plex Sans', system-ui, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
     color-scheme: light;
@@ -17,7 +17,7 @@
     :root {
       --bg: #0b0f0e; --surface: #121817; --surface-2: #1a211f; --fg: #e9efec; --muted: #8fa39d;
       --line: #263330; --accent: #35c9a8; --accent-soft: #10332c;
-      --ok: #3ecb7a; --warn: #e3a93a; --danger: #ef6a5c; --correction: #b48cf0;
+      --ok: #3ecb7a; --warn: #e3a93a; --danger: #ef6a5c; --correction: #b48cf0; --pull: #6ea8f5;
       color-scheme: dark;
     }
   }
@@ -63,12 +63,16 @@
   .topo { position: relative; }
   .topo svg { width: 100%; height: auto; display: block; }
   .node-label { font-family: var(--font-mono); }
-  .flow-path { fill: none; stroke: var(--line); stroke-width: 2; }
+  .flow-path { fill: none; stroke: var(--line); stroke-width: 2; transition: stroke 0.4s ease; }
+  .flow-path.offline { stroke: var(--danger); stroke-dasharray: 5 4; }
   .packet { fill: var(--accent); filter: drop-shadow(0 0 4px var(--accent)); }
+  .packet.pull { fill: var(--pull); filter: drop-shadow(0 0 4px var(--pull)); }
   .node-circle { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; transition: stroke 0.5s ease, stroke-width 0.5s ease; }
   .node-circle.active { stroke: var(--accent); stroke-width: 3; }
+  .node-circle.active-pull { stroke: var(--pull); stroke-width: 3; }
   .node-circle.quarantine { stroke: var(--danger); }
   .node-circle.correction { stroke: var(--correction); }
+  .node-circle.offline { stroke: var(--danger); stroke-dasharray: 4 3; }
   .correction-ring { fill: none; stroke: var(--correction); stroke-width: 3; opacity: 0; pointer-events: none; }
   .correction-label { fill: var(--correction); font-family: var(--font-mono); font-size: 11px; font-weight: 700; opacity: 0; pointer-events: none; }
 
@@ -80,6 +84,14 @@
     font-weight: 600; margin-top: 6px; }
   .status-pill.active { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
   .status-pill.other { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+  .status-pill.offline { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); margin-left: 6px; }
+
+  .pipeline { display: flex; align-items: stretch; gap: 0; overflow-x: auto; }
+  .pipeline .stage { flex: 1 1 0; min-width: 118px; padding: 10px 12px; border-right: 1px solid var(--line); }
+  .pipeline .stage:last-child { border-right: 0; }
+  .pipeline .stage .k { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; line-height: 1.3; }
+  .pipeline .stage .v { font-family: var(--font-mono); font-size: 20px; font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .pipeline .arrow { flex: none; display: flex; align-items: center; color: var(--muted); font-size: 14px; padding: 0 2px; }
 
   .metrics { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
   .metric { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -170,7 +182,22 @@
         <text x="490" y="148" text-anchor="middle" class="correction-label" id="correction-label">correction issued</text>
       </g>
     </svg>
-    <div class="sub" style="margin-top:4px">A teal dot travels from a site to Central the instant that site's last-received-batch timestamp changes — a real push, not a simulation. Downstream delivery to the *other* site only happens on referral (hydrate), which this diagram doesn't carry — demonstrate that by searching the patient at the other site. A purple ring pulses directly on Central when central itself issues a correction (it originates there, not travels from a site).</div>
+    <div class="sub" style="margin-top:4px">A teal dot travels site → Central the instant that site's last-received-batch timestamp changes — a real push, not a simulation. A blue dot travels Central → site when that site's pull cursor moves forward — a hospital automatically keeps receiving changes to any patient it has ever registered itself, not only ones it explicitly fetched. A purple ring pulses directly on Central when central itself issues a correction (it originates there, not travels from a site).</div>
+  </div>
+
+  <div class="panel">
+    <h2>How a change moves through the system</h2>
+    <div class="pipeline" id="pipeline-strip">
+      <div class="stage" title="Captured by this site's MySQL triggers, not yet pushed."><div class="k">Queued at site</div><div class="v" id="p-unsent">—</div></div>
+      <div class="arrow">→</div>
+      <div class="stage" title="Pushed and validated by Central, applied to its working data."><div class="k">Sent &amp; confirmed</div><div class="v" id="p-received">—</div></div>
+      <div class="arrow">→</div>
+      <div class="stage" title="Held back by Central after failing a check -- most clear automatically once the site sends a corrected version."><div class="k">Held for review</div><div class="v" id="p-held">—</div></div>
+      <div class="arrow">→</div>
+      <div class="stage" title="Republished to Central's feed for other sites to pull -- includes corrections, not only site pushes."><div class="k">Published</div><div class="v" id="p-feed">—</div></div>
+      <div class="arrow">→</div>
+      <div class="stage" title="In the feed but not yet fetched by the site(s) subscribed to it -- drains on each site's next pull."><div class="k">Not yet pulled</div><div class="v" id="p-unpulled">—</div></div>
+    </div>
   </div>
 
   <div class="grid" id="node-grid"></div>
@@ -178,7 +205,7 @@
   <div class="panel">
     <h2>Central feed</h2>
     <div class="global-grid">
-      <div class="stat-tile" title="Every change any site has ever pushed to Central's feed."><div class="k">Total changes</div><div class="v" id="g-feed">—</div></div>
+      <div class="stat-tile" title="Central's own outgoing feed: every change it has republished for other sites, including corrections -- not the same as what sites have pushed in (see each site's Events received)."><div class="k">Published to feed</div><div class="v" id="g-feed">—</div></div>
       <div class="stat-tile" title="Protected-field conflicts (national ID, birth date, sex, death status) waiting for a data officer to pick a side — never auto-resolved."><div class="k">Conflicts open</div><div class="v" id="g-open-conf">—</div></div>
       <div class="stat-tile" title="Ordinary field conflicts Central resolved itself using Hybrid Logical Clock ordering (last writer wins)."><div class="k">Conflicts auto-resolved</div><div class="v" id="g-logged-conf">—</div></div>
       <div class="stat-tile" title="Patients flagged as possibly the same person across sites (matched by national ID, or name + sex + birthdate). Never auto-merged."><div class="k">Possible duplicates</div><div class="v" id="g-dupes">—</div></div>
@@ -205,8 +232,8 @@
     <h2>What to watch, by test scenario</h2>
     <div class="legend">
       <div class="item"><span class="num">1</span><div class="text"><b>Forward push</b><span>Register a patient at a site. Watch the dot travel to Central and that site's Events received climb.</span></div></div>
-      <div class="item"><span class="num">2</span><div class="text"><b>Referral / on-demand pull</b><span>Hydrate a patient into the other site (not shown here). Then any further edit at either site pushes normally — watch the dot again.</span></div></div>
-      <div class="item"><span class="num">3</span><div class="text"><b>Offline / reconnect</b><span>Disconnect a site's agent from the wan network. Watch its Unsent climb and Oldest unsent age. Reconnect — watch it drain back to zero.</span></div></div>
+      <div class="item"><span class="num">2</span><div class="text"><b>Referral / on-demand pull</b><span>Hydrate a patient into the other site — this fetches immediately, outside the diagram. After that the site is auto-subscribed, so any further edit anywhere pulls in on the next cycle: watch the blue dot (Central → site).</span></div></div>
+      <div class="item"><span class="num">3</span><div class="text"><b>Offline / reconnect</b><span>Disconnect a site's agent from the wan network. Watch its Unsent climb, its link turn red and dashed, and an Offline badge appear once its heartbeat is stale. Reconnect — it clears and the backlog drains.</span></div></div>
       <div class="item"><span class="num">4</span><div class="text"><b>Conflict handling</b><span>Edit the same field at both sites quickly. Watch Conflicts open or auto-resolved move.</span></div></div>
       <div class="item"><span class="num">5</span><div class="text"><b>Reconciliation</b><span>Wait for the scheduled interval. Watch each site's Last reconciliation move off "—".</span></div></div>
       <div class="item"><span class="num">6</span><div class="text"><b>Duplicate detection</b><span>Register two patients with the same name, sex and birthdate at different sites. Watch Possible duplicates increase.</span></div></div>
@@ -250,6 +277,7 @@
 
   var timer = null;
   var lastBatchAt = {};
+  var lastPullCursor = {};
   var lastCorrectionCount = null;
 
   // "Last event" banner: a real delta off data the dashboard already returns
@@ -344,30 +372,37 @@
     });
   }
 
+  var OFFLINE_AFTER_S = 45; // demo heartbeat interval is 15s; 3 missed beats is a real outage, not poll jitter
+
   function renderNodeCard(site) {
     var unsentTotal = Object.values(site.backlog || {}).reduce(function (a, b) { return a + b; }, 0);
+    var isOffline = site.heartbeat_age_s != null && site.heartbeat_age_s > OFFLINE_AFTER_S;
     var statusClass = site.status === 'active' ? 'active' : 'other';
     var rec = site.reconciliation;
     var recText = rec ? (rec.status + ', ' + rec.differences + ' diff') : '—';
     var triggers = site.triggers || '—';
     var clockOffset = site.clock_offset_s != null ? site.clock_offset_s + ' s' : '—';
     var heartbeat = site.heartbeat_age_s != null ? site.heartbeat_age_s + ' s ago' : '—';
+    var notYetPulled = (site.feed_max_seq != null && site.pull_cursor != null)
+      ? Math.max(0, site.feed_max_seq - site.pull_cursor) : null;
     return '' +
       '<div class="panel node-card" data-site="' + escapeHtml(site.site_code) + '">' +
         '<h3>' + escapeHtml(site.name) + '</h3>' +
         '<div class="code">' + escapeHtml(site.site_code) + (site.location_id ? ' · location ' + site.location_id : '') + '</div>' +
         '<span class="status-pill ' + statusClass + '">' + escapeHtml(site.status) + '</span>' +
+        (isOffline ? '<span class="status-pill offline">offline</span>' : '') +
         '<div class="metrics">' +
           '<div class="metric" title="Captured local changes not yet pushed to Central."><div class="k">Unsent</div><div class="v ' + (unsentTotal > 0 ? 'warn' : 'ok') + '">' + unsentTotal + '</div></div>' +
           '<div class="metric" title="Age of the oldest unsent change — how far behind this site could fall before it gets flagged."><div class="k">Oldest unsent</div><div class="v ' + (site.oldest_unsent_s > 300 ? 'warn' : '') + '">' + (site.oldest_unsent_s != null ? site.oldest_unsent_s + ' s' : '—') + '</div></div>' +
           '<div class="metric" title="Changes from this site that Central has validated and applied so far."><div class="k">Events received</div><div class="v">' + site.events_received + '</div></div>' +
-          '<div class="metric" title="Rows Central holds in this site\'s dedicated backup copy — used only to check for drift during reconciliation, not Central\'s own working data."><div class="k">Backup rows</div><div class="v">' + site.backup_rows + '</div></div>' +
-          '<div class="metric" title="Events held back because they failed a validation check. A data officer must release or fix them before they apply."><div class="k">Quarantine</div><div class="v ' + (site.open_quarantine > 0 ? 'danger' : 'ok') + '">' + site.open_quarantine + '</div></div>' +
-          '<div class="metric" title="Events waiting behind a quarantined one (their dependents) — applied automatically once it is resolved."><div class="k">Parked at site</div><div class="v">' + site.parked + (site.orphaned ? ' (' + site.orphaned + ' orphaned)' : '') + '</div></div>' +
+          '<div class="metric" title="In Central\'s feed for this site but not yet fetched by its next pull."><div class="k">Not yet pulled</div><div class="v ' + (notYetPulled > 0 ? 'warn' : 'ok') + '">' + (notYetPulled != null ? notYetPulled : '—') + '</div></div>' +
+          '<div class="metric" title="Rows Central holds in this site\'s dedicated backup copy — checked for drift during reconciliation, and also what this site would be restored from if its server were lost."><div class="k">Backup rows</div><div class="v">' + site.backup_rows + '</div></div>' +
+          '<div class="metric" title="Changes held back because they failed a check. Most clear automatically once the site sends a corrected version; a data officer is only needed for the rest."><div class="k">Held for review</div><div class="v ' + (site.open_quarantine > 0 ? 'danger' : 'ok') + '">' + site.open_quarantine + '</div></div>' +
+          '<div class="metric" title="Changes pulled from Central waiting here because the record they depend on (e.g. the patient) hasn\'t arrived at this site yet — applied automatically once it does."><div class="k">Parked at site</div><div class="v">' + site.parked + (site.orphaned ? ' (' + site.orphaned + ' orphaned)' : '') + '</div></div>' +
           '<div class="metric" title="Difference between this site\'s clock and Central\'s, from the last heartbeat."><div class="k">Clock offset</div><div class="v">' + clockOffset + '</div></div>' +
           '<div class="metric" title="Whether this site\'s MySQL capture triggers (installed by rake site_sync:install) are present and healthy."><div class="k">Triggers</div><div class="v">' + escapeHtml(triggers) + '</div></div>' +
-          '<div class="metric" title="Time since this site\'s last heartbeat ping to Central."><div class="k">Heartbeat</div><div class="v">' + heartbeat + '</div></div>' +
-          '<div class="metric full" title="Result of the most recent Merkle-tree comparison between this site\'s live data and Central\'s backup copy of it."><div class="k">Last reconciliation</div><div class="v">' + escapeHtml(recText) + '</div></div>' +
+          '<div class="metric" title="Time since this site\'s last heartbeat ping to Central. Over ' + OFFLINE_AFTER_S + 's and this card is marked offline."><div class="k">Heartbeat</div><div class="v' + (isOffline ? ' danger' : '') + '">' + heartbeat + '</div></div>' +
+          '<div class="metric full" title="Result of the most recent Merkle-style (two-level bucketed) comparison between this site\'s live data and Central\'s backup copy of it."><div class="k">Last reconciliation</div><div class="v">' + escapeHtml(recText) + '</div></div>' +
         '</div>' +
       '</div>';
   }
@@ -412,6 +447,47 @@
     requestAnimationFrame(step);
   }
 
+  function firePacketPull(site_code) {
+    var pathId = site_code === 'KCH' ? 'path-kch' : (site_code === 'ZCH' ? 'path-zch' : null);
+    if (!pathId) return;
+    var path = document.getElementById(pathId);
+    if (!path) return;
+    var svgNS = 'http://www.w3.org/2000/svg';
+    var dot = document.createElementNS(svgNS, 'circle');
+    dot.setAttribute('r', '7');
+    dot.setAttribute('class', 'packet pull');
+    path.parentNode.appendChild(dot);
+    var len = path.getTotalLength();
+    var start = performance.now();
+    var duration = 3200;
+    function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+    var dstCircle = document.querySelector('#node-' + site_code.toLowerCase() + ' circle');
+    var centralCircle = document.querySelector('#node-central circle');
+    if (centralCircle) centralCircle.classList.add('active-pull');
+
+    function step(now) {
+      var raw = Math.min(1, (now - start) / duration);
+      var t = easeInOutCubic(raw);
+      // Same path as a push, walked from Central's end (1 - t) to the site's end.
+      var p = path.getPointAtLength((1 - t) * len);
+      dot.setAttribute('cx', p.x);
+      dot.setAttribute('cy', p.y);
+      dot.setAttribute('opacity', String(1 - raw * 0.15));
+      if (raw < 1) {
+        requestAnimationFrame(step);
+      } else {
+        dot.remove();
+        if (centralCircle) centralCircle.classList.remove('active-pull');
+        if (dstCircle) {
+          dstCircle.classList.add('active-pull');
+          setTimeout(function () { dstCircle.classList.remove('active-pull'); }, 900);
+        }
+      }
+    }
+    requestAnimationFrame(step);
+  }
+
   function fireCorrectionPulse() {
     var ring = els.correctionRing;
     var label = els.correctionLabel;
@@ -438,6 +514,7 @@
   function render(data) {
     updateLastEvent(data);
 
+    data.sites.forEach(function (s) { s.feed_max_seq = data.feed_max_seq; });
     var cards = data.sites.map(renderNodeCard).join('');
     els.nodeGrid.innerHTML = cards;
 
@@ -450,6 +527,31 @@
     var quarantineAny = data.sites.some(function (s) { return s.open_quarantine > 0; });
     var centralCircle = document.querySelector('#node-central circle');
     if (centralCircle) centralCircle.classList.toggle('quarantine', quarantineAny);
+
+    // Pipeline strip: a flow summary from data the page already has.
+    var unsentSum = data.sites.reduce(function (sum, s) {
+      return sum + Object.values(s.backlog || {}).reduce(function (a, b) { return a + b; }, 0);
+    }, 0);
+    var receivedSum = data.sites.reduce(function (sum, s) { return sum + (s.events_received || 0); }, 0);
+    var heldSum = data.sites.reduce(function (sum, s) { return sum + (s.open_quarantine || 0); }, 0);
+    var unpulledSum = data.sites.reduce(function (sum, s) {
+      return sum + Math.max(0, (data.feed_max_seq || 0) - (s.pull_cursor || 0));
+    }, 0);
+    document.getElementById('p-unsent').textContent = unsentSum;
+    document.getElementById('p-received').textContent = receivedSum;
+    document.getElementById('p-held').textContent = heldSum;
+    document.getElementById('p-feed').textContent = data.feed_size;
+    document.getElementById('p-unpulled').textContent = unpulledSum;
+
+    // Offline per site: dashed red link and node when the heartbeat is stale.
+    data.sites.forEach(function (s) {
+      var offline = s.heartbeat_age_s != null && s.heartbeat_age_s > OFFLINE_AFTER_S;
+      var pathId = s.site_code === 'KCH' ? 'path-kch' : (s.site_code === 'ZCH' ? 'path-zch' : null);
+      var path = pathId && document.getElementById(pathId);
+      if (path) path.classList.toggle('offline', offline);
+      var circle = document.querySelector('#node-' + s.site_code.toLowerCase() + ' circle.node-circle');
+      if (circle) circle.classList.toggle('offline', offline);
+    });
 
     if (data.alerts && data.alerts.length) {
       els.alertsTable.innerHTML = data.alerts.slice(0, 8).map(function (a) {
@@ -488,6 +590,12 @@
         firePacket(s.site_code);
       }
       lastBatchAt[s.site_code] = s.last_batch_at;
+
+      var prevCursor = lastPullCursor[s.site_code];
+      if (typeof s.pull_cursor === 'number' && typeof prevCursor === 'number' && s.pull_cursor > prevCursor) {
+        firePacketPull(s.site_code);
+      }
+      lastPullCursor[s.site_code] = s.pull_cursor;
     });
   }
 

@@ -10,19 +10,25 @@ module SiteSync
     end
 
     def status
+      # Age computed in SQL, not Ruby's Time.now - oldest: this site's MySQL
+      # runs in UTC while Rails reads it back as Africa/Blantyre local (see
+      # config.active_record.default_timezone), so a Ruby-side subtraction
+      # would be off by the zone offset. Both sides of the diff happening in
+      # MySQL cancels it out.
       unsent = @conn.select_all(<<~SQL).to_a
-        SELECT l.priority, COUNT(*) AS events, MIN(l.captured_at) AS oldest
+        SELECT l.priority, COUNT(*) AS events,
+               TIMESTAMPDIFF(SECOND, MIN(l.captured_at), NOW(6)) AS oldest_age_s
         FROM sync_change_log l LEFT JOIN sync_batches b ON b.id = l.batch_id
         WHERE l.batch_id IS NULL OR b.status <> 'acked'
         GROUP BY l.priority
       SQL
-      oldest = unsent.map { |r| r['oldest'] }.compact.min
+      oldest_age = unsent.map { |r| r['oldest_age_s'] }.compact.max
       {
         'site_time_us' => Hlc.now_us,
         'server_generation' => State.server_generation,
         'mode' => State.get('mode', 'normal'),
         'backlog' => unsent.to_h { |r| [r['priority'], r['events'].to_i] },
-        'oldest_unsent_seconds' => oldest ? (Time.now - oldest).round : 0,
+        'oldest_unsent_seconds' => oldest_age || 0,
         'open_quarantine' => @conn.select_value("SELECT COUNT(*) FROM sync_quarantine_notices WHERE status = 'open'").to_i,
         'pending_apply' => @conn.select_value('SELECT COUNT(*) FROM sync_waiting_changes WHERE orphaned_at IS NULL').to_i,
         'orphaned' => @conn.select_value('SELECT COUNT(*) FROM sync_waiting_changes WHERE orphaned_at IS NOT NULL').to_i,

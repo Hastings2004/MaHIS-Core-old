@@ -11,8 +11,12 @@ module SiteSync
     def data
       {
         'generated_at' => Time.now.iso8601,
-        'sites' => @conn.select_all('SELECT * FROM sync_sites ORDER BY site_code').to_a.map { |site| site_row(site) },
+        'sites' => @conn.select_all(<<~SQL).to_a.map { |site| site_row(site) },
+          SELECT *, TIMESTAMPDIFF(SECOND, last_heartbeat_at, NOW(6)) AS heartbeat_age_s_sql
+          FROM sync_sites ORDER BY site_code
+        SQL
         'feed_size' => @conn.select_value('SELECT COUNT(*) FROM sync_central_feed').to_i,
+        'feed_max_seq' => @conn.select_value('SELECT COALESCE(MAX(global_seq), 0) FROM sync_central_feed').to_i,
         'open_conflicts' => @conn.select_value("SELECT COUNT(*) FROM sync_conflicts WHERE status = 'open'").to_i,
         'logged_conflicts' => @conn.select_value("SELECT COUNT(*) FROM sync_conflicts WHERE status = 'logged'").to_i,
         'duplicates' => @conn.select_all(<<~SQL).to_a,
@@ -49,9 +53,14 @@ module SiteSync
       {
         'site_code' => site['site_code'], 'name' => location_name || site['name'], 'location_id' => site['location_id'],
         'status' => site['status'], 'server_generation' => site['server_generation'].to_i,
-        'heartbeat_age_s' => site['last_heartbeat_at'] && (Time.now - site['last_heartbeat_at']).round,
+        # Computed in SQL (not Time.now - site['last_heartbeat_at']): MySQL runs
+        # in UTC while Rails is configured for Africa/Blantyre with
+        # default_timezone = :local, so a Ruby-side subtraction is off by the
+        # zone offset. Doing both sides of the diff in MySQL cancels it out.
+        'heartbeat_age_s' => site['heartbeat_age_s_sql']&.to_i,
         'backlog' => beat['backlog'] || {}, 'oldest_unsent_s' => beat['oldest_unsent_seconds'],
         'clock_offset_s' => beat['clock_offset_s'], 'mode' => beat['mode'],
+        'pull_cursor' => beat['pull_cursor'].to_i,
         'parked' => beat['pending_apply'].to_i, 'orphaned' => beat['orphaned'].to_i,
         'triggers' => beat['triggers_installed'] && "#{beat['triggers_installed']}/#{beat['triggers_expected']}",
         'last_batch_at' => @conn.select_value("SELECT MAX(received_at) FROM sync_received_batches WHERE site_code = #{code}"),
@@ -158,7 +167,7 @@ module SiteSync
             <th title="Age of the oldest unacknowledged change -- how far behind this site is">Oldest unsent</th>
             <th title="Total changes central has received and applied from this site, lifetime count">Events received</th>
             <th title="Rows of this site's data central holds in its own backup copy, used to rebuild the site if needed">Backup rows</th>
-            <th title="Changes central rejected (failed validation) and parked for manual review instead of applying">Quarantine</th>
+            <th title="Changes central held back after failing a check. Most clear automatically once the site sends a corrected version; a data officer is only needed for the rest">Held for review</th>
             <th title="When the nightly checksum comparison between this site and central last ran">Last reconciliation</th>
           </tr>
           #{sites}
@@ -267,9 +276,9 @@ module SiteSync
         <h2>Central corrections (latest)</h2>
         <div class="wrap"><table><tr><th>When</th><th>Table</th><th>Row</th><th>Changed</th><th>Reason</th></tr>
           #{corrections.presence || '<tr><td colspan="5">None yet</td></tr>'}</table></div>
-        <h2>Quarantine (latest)</h2>
+        <h2>Held for review (latest)</h2>
         <div class="wrap"><table><tr><th>#</th><th>Site</th><th>Table</th><th>Record</th><th>Reason</th><th>Details</th><th>Status</th></tr>
-          #{quarantine.presence || '<tr><td colspan="7">Nothing quarantined</td></tr>'}</table></div>
+          #{quarantine.presence || '<tr><td colspan="7">Nothing held</td></tr>'}</table></div>
         <h2>Alerts</h2>
         <div class="wrap"><table><tr><th>Time</th><th>Site</th><th>Kind</th><th>Message</th></tr>
           #{alerts.presence || '<tr><td colspan="4">No alerts</td></tr>'}</table></div>
