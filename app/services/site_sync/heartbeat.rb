@@ -33,6 +33,7 @@ module SiteSync
         'pending_apply' => @conn.select_value('SELECT COUNT(*) FROM sync_waiting_changes WHERE orphaned_at IS NULL').to_i,
         'orphaned' => @conn.select_value('SELECT COUNT(*) FROM sync_waiting_changes WHERE orphaned_at IS NOT NULL').to_i,
         'pull_cursor' => State.get_i('pull_cursor', 0),
+        'pulled_applied_total' => State.get_i('pulled_applied_total', 0),
         'triggers_installed' => installed_triggers.size,
         'triggers_expected' => TriggerGenerator.expected_trigger_names.size,
         'facility' => facility

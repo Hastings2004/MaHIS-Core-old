@@ -60,7 +60,10 @@ module SiteSync
         'heartbeat_age_s' => site['heartbeat_age_s_sql']&.to_i,
         'backlog' => beat['backlog'] || {}, 'oldest_unsent_s' => beat['oldest_unsent_seconds'],
         'clock_offset_s' => beat['clock_offset_s'], 'mode' => beat['mode'],
-        'pull_cursor' => beat['pull_cursor'].to_i,
+        # Not coerced with .to_i: before this site's first heartbeat these are
+        # genuinely unknown, and turning that into 0 would make "Not yet
+        # pulled" claim the entire feed is outstanding instead of showing "—".
+        'pull_cursor' => beat['pull_cursor'], 'applied_total' => beat['pulled_applied_total'],
         'parked' => beat['pending_apply'].to_i, 'orphaned' => beat['orphaned'].to_i,
         'triggers' => beat['triggers_installed'] && "#{beat['triggers_installed']}/#{beat['triggers_expected']}",
         'last_batch_at' => @conn.select_value("SELECT MAX(received_at) FROM sync_received_batches WHERE site_code = #{code}"),

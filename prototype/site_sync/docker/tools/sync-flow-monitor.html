@@ -92,6 +92,8 @@
   .pipeline .stage .k { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; line-height: 1.3; }
   .pipeline .stage .v { font-family: var(--font-mono); font-size: 20px; font-variant-numeric: tabular-nums; margin-top: 4px; }
   .pipeline .arrow { flex: none; display: flex; align-items: center; color: var(--muted); font-size: 14px; padding: 0 2px; }
+  .pipeline .stage.branch { border-left: 1px dashed var(--line); border-right: 0; margin-left: 4px; }
+  .pipeline .arrow.branch { opacity: 0.6; }
 
   .metrics { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
   .metric { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -154,13 +156,17 @@
         <label for="poll-ms">Poll (s)</label>
         <input id="poll-ms" value="3" type="number" min="1" max="30">
       </div>
+      <div class="field narrow">
+        <label for="offline-after">Offline after (s)</label>
+        <input id="offline-after" value="45" type="number" min="5" max="3600" title="Mark a site offline once its heartbeat is older than this. Scale it to the deployment's actual SITE_SYNC_HEARTBEAT_EVERY -- the 45s default suits this demo's 15s interval, not a production one.">
+      </div>
       <button class="primary" id="connect-btn">Connect</button>
     </div>
     <div class="error-banner" id="error-banner" style="margin-top:10px"></div>
   </div>
 
   <div class="panel topo">
-    <h2>Topology — live push traffic</h2>
+    <h2>Topology — live sync traffic</h2>
     <svg viewBox="0 0 900 220" id="topo-svg" role="img" aria-label="KCH and ZCH connected to Central">
       <path id="path-kch" class="flow-path" d="M 150 60 C 400 60, 400 110, 450 110" />
       <path id="path-zch" class="flow-path" d="M 150 170 C 400 170, 400 110, 450 110" />
@@ -190,13 +196,13 @@
     <div class="pipeline" id="pipeline-strip">
       <div class="stage" title="Captured by this site's MySQL triggers, not yet pushed."><div class="k">Queued at site</div><div class="v" id="p-unsent">—</div></div>
       <div class="arrow">→</div>
-      <div class="stage" title="Pushed and validated by Central, applied to its working data."><div class="k">Sent &amp; confirmed</div><div class="v" id="p-received">—</div></div>
-      <div class="arrow">→</div>
-      <div class="stage" title="Held back by Central after failing a check -- most clear automatically once the site sends a corrected version."><div class="k">Held for review</div><div class="v" id="p-held">—</div></div>
+      <div class="stage" title="Pushed by the site and received in a valid batch -- this total includes anything currently held for review below, not only what was applied cleanly."><div class="k">Sent &amp; confirmed</div><div class="v" id="p-received">—</div></div>
       <div class="arrow">→</div>
       <div class="stage" title="Republished to Central's feed for other sites to pull -- includes corrections, not only site pushes."><div class="k">Published</div><div class="v" id="p-feed">—</div></div>
       <div class="arrow">→</div>
       <div class="stage" title="In the feed but not yet fetched by the site(s) subscribed to it -- drains on each site's next pull."><div class="k">Not yet pulled</div><div class="v" id="p-unpulled">—</div></div>
+      <div class="arrow branch" title="Not a further step after Published -- a branch off the check right after Sent &amp; confirmed. Most clear automatically once the site sends a corrected version.">⤷</div>
+      <div class="stage branch" title="Changes from Sent &amp; confirmed held back after failing a check, instead of being applied and published. Most clear automatically once the site sends a corrected version."><div class="k">Held for review</div><div class="v" id="p-held">—</div></div>
     </div>
   </div>
 
@@ -251,6 +257,7 @@
     url: document.getElementById('central-url'),
     token: document.getElementById('admin-token'),
     pollS: document.getElementById('poll-ms'),
+    offlineAfter: document.getElementById('offline-after'),
     connectBtn: document.getElementById('connect-btn'),
     livePill: document.getElementById('live-pill'),
     liveText: document.getElementById('live-text'),
@@ -273,11 +280,12 @@
     if (saved.url) els.url.value = saved.url;
     if (saved.token) els.token.value = saved.token;
     if (saved.pollS) els.pollS.value = saved.pollS;
+    if (saved.offlineAfter) els.offlineAfter.value = saved.offlineAfter;
   } catch (e) { /* ignore */ }
 
   var timer = null;
   var lastBatchAt = {};
-  var lastPullCursor = {};
+  var lastAppliedTotal = {};
   var lastCorrectionCount = null;
 
   // "Last event" banner: a real delta off data the dashboard already returns
@@ -348,7 +356,7 @@
   function saveSettings() {
     try {
       localStorage.setItem('syncFlowMonitor.settings', JSON.stringify({
-        url: els.url.value, token: els.token.value, pollS: els.pollS.value
+        url: els.url.value, token: els.token.value, pollS: els.pollS.value, offlineAfter: els.offlineAfter.value
       }));
     } catch (e) { /* ignore */ }
   }
@@ -372,11 +380,16 @@
     });
   }
 
-  var OFFLINE_AFTER_S = 45; // demo heartbeat interval is 15s; 3 missed beats is a real outage, not poll jitter
+  // From the "Offline after (s)" field, not a fixed constant: the right
+  // threshold depends on this deployment's SITE_SYNC_HEARTBEAT_EVERY, which
+  // the page has no way to know (demo default 15s; production default 300s).
+  function offlineThreshold() {
+    return Math.max(5, Number(els.offlineAfter.value) || 45);
+  }
 
   function renderNodeCard(site) {
     var unsentTotal = Object.values(site.backlog || {}).reduce(function (a, b) { return a + b; }, 0);
-    var isOffline = site.heartbeat_age_s != null && site.heartbeat_age_s > OFFLINE_AFTER_S;
+    var isOffline = site.heartbeat_age_s != null && site.heartbeat_age_s > offlineThreshold();
     var statusClass = site.status === 'active' ? 'active' : 'other';
     var rec = site.reconciliation;
     var recText = rec ? (rec.status + ', ' + rec.differences + ' diff') : '—';
@@ -401,7 +414,7 @@
           '<div class="metric" title="Changes pulled from Central waiting here because the record they depend on (e.g. the patient) hasn\'t arrived at this site yet — applied automatically once it does."><div class="k">Parked at site</div><div class="v">' + site.parked + (site.orphaned ? ' (' + site.orphaned + ' orphaned)' : '') + '</div></div>' +
           '<div class="metric" title="Difference between this site\'s clock and Central\'s, from the last heartbeat."><div class="k">Clock offset</div><div class="v">' + clockOffset + '</div></div>' +
           '<div class="metric" title="Whether this site\'s MySQL capture triggers (installed by rake site_sync:install) are present and healthy."><div class="k">Triggers</div><div class="v">' + escapeHtml(triggers) + '</div></div>' +
-          '<div class="metric" title="Time since this site\'s last heartbeat ping to Central. Over ' + OFFLINE_AFTER_S + 's and this card is marked offline."><div class="k">Heartbeat</div><div class="v' + (isOffline ? ' danger' : '') + '">' + heartbeat + '</div></div>' +
+          '<div class="metric" title="Time since this site\'s last heartbeat ping to Central. Over ' + offlineThreshold() + 's (set in Offline after, above) and this card is marked offline."><div class="k">Heartbeat</div><div class="v' + (isOffline ? ' danger' : '') + '">' + heartbeat + '</div></div>' +
           '<div class="metric full" title="Result of the most recent Merkle-style (two-level bucketed) comparison between this site\'s live data and Central\'s backup copy of it."><div class="k">Last reconciliation</div><div class="v">' + escapeHtml(recText) + '</div></div>' +
         '</div>' +
       '</div>';
@@ -534,18 +547,19 @@
     }, 0);
     var receivedSum = data.sites.reduce(function (sum, s) { return sum + (s.events_received || 0); }, 0);
     var heldSum = data.sites.reduce(function (sum, s) { return sum + (s.open_quarantine || 0); }, 0);
-    var unpulledSum = data.sites.reduce(function (sum, s) {
-      return sum + Math.max(0, (data.feed_max_seq || 0) - (s.pull_cursor || 0));
-    }, 0);
+    var sitesWithCursor = data.sites.filter(function (s) { return typeof s.pull_cursor === 'number'; });
+    var unpulledSum = sitesWithCursor.length
+      ? sitesWithCursor.reduce(function (sum, s) { return sum + Math.max(0, (data.feed_max_seq || 0) - s.pull_cursor); }, 0)
+      : null;
     document.getElementById('p-unsent').textContent = unsentSum;
     document.getElementById('p-received').textContent = receivedSum;
     document.getElementById('p-held').textContent = heldSum;
     document.getElementById('p-feed').textContent = data.feed_size;
-    document.getElementById('p-unpulled').textContent = unpulledSum;
+    document.getElementById('p-unpulled').textContent = unpulledSum != null ? unpulledSum : '—';
 
     // Offline per site: dashed red link and node when the heartbeat is stale.
     data.sites.forEach(function (s) {
-      var offline = s.heartbeat_age_s != null && s.heartbeat_age_s > OFFLINE_AFTER_S;
+      var offline = s.heartbeat_age_s != null && s.heartbeat_age_s > offlineThreshold();
       var pathId = s.site_code === 'KCH' ? 'path-kch' : (s.site_code === 'ZCH' ? 'path-zch' : null);
       var path = pathId && document.getElementById(pathId);
       if (path) path.classList.toggle('offline', offline);
@@ -591,11 +605,15 @@
       }
       lastBatchAt[s.site_code] = s.last_batch_at;
 
-      var prevCursor = lastPullCursor[s.site_code];
-      if (typeof s.pull_cursor === 'number' && typeof prevCursor === 'number' && s.pull_cursor > prevCursor) {
+      // applied_total, not pull_cursor: the cursor advances whenever a site
+      // catches up to the feed's current end, even on a page with nothing
+      // relevant to it (feed_controller.rb's "matching or not"). Only a real
+      // applied change should animate.
+      var prevApplied = lastAppliedTotal[s.site_code];
+      if (typeof s.applied_total === 'number' && typeof prevApplied === 'number' && s.applied_total > prevApplied) {
         firePacketPull(s.site_code);
       }
-      lastPullCursor[s.site_code] = s.pull_cursor;
+      lastAppliedTotal[s.site_code] = s.applied_total;
     });
   }
 

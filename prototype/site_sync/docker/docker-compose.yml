@@ -41,6 +41,11 @@ x-db: &db
     - --collation-server=utf8mb3_unicode_ci
     - --sql-mode=STRICT_TRANS_TABLES
     - --log-bin-trust-function-creators=1
+    # Matches Rails' config.time_zone (Africa/Blantyre, a fixed UTC+2 with no
+    # DST) so NOW(6)/trigger-captured timestamps agree with what Rails writes
+    # and reads under default_timezone = :local -- otherwise absolute times
+    # (not just the SQL-computed ages) are 2 hours off.
+    - --default-time-zone=+02:00
     # Small footprint: three of these run on one laptop beside five Rails
     # processes. A real site server would give MySQL far more.
     - --innodb-buffer-pool-size=64M

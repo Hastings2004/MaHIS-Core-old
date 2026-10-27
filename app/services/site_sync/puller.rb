@@ -25,7 +25,14 @@ module SiteSync
 
         items = response.body['events']
         @conn.transaction do
+          before = @stats[:applied]
           items.each { |item| apply_one(item['event'], item['global_seq']) }
+          newly_applied = @stats[:applied] - before
+          # Central also advances next_cursor on an empty/partial page ("caught
+          # up", not "received something") -- so the cursor alone can't tell a
+          # real delivery from a hospital just catching up to someone else's
+          # change. This running total only grows when a row actually applied.
+          State.set('pulled_applied_total', State.get_i('pulled_applied_total', 0) + newly_applied) if newly_applied.positive?
           State.set('pull_cursor', response.body['next_cursor'])
         end
         applied ||= items.any?
