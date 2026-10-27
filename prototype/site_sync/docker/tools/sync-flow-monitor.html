@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sync Flow Monitor</title>
+<style>
+  :root {
+    --bg: #f6f7f5; --surface: #ffffff; --surface-2: #eef0ed; --fg: #12171a; --muted: #5b6b66;
+    --line: #dde3df; --accent: #0e7c6b; --accent-soft: #d9efe9;
+    --ok: #1a8f4c; --warn: #b4790a; --danger: #c4372b; --correction: #7c3fd4;
+    --font-display: 'IBM Plex Sans', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0f0e; --surface: #121817; --surface-2: #1a211f; --fg: #e9efec; --muted: #8fa39d;
+      --line: #263330; --accent: #35c9a8; --accent-soft: #10332c;
+      --ok: #3ecb7a; --warn: #e3a93a; --danger: #ef6a5c; --correction: #b48cf0;
+      color-scheme: dark;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg); font-family: var(--font-display);
+    margin: 0; padding: 20px 16px 40px; font-size: 14px; line-height: 1.5;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .top-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+
+  .live-pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--line); font-size: 12px; color: var(--muted); font-family: var(--font-mono); }
+  .live-pill.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+  .live-pill.off { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+  .live-pill.on .dot { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+
+  .settings { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+  .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .field label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .field input { font: inherit; font-family: var(--font-mono); font-size: 12.5px; padding: 7px 9px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg); width: 220px; max-width: 100%; }
+  .field.narrow input { width: 90px; }
+  button.primary { padding: 8px 16px; border: 0; border-radius: 6px; background: var(--accent); color: #fff;
+    font-weight: 600; font-size: 13px; cursor: pointer; }
+  button.primary:active { transform: translateY(1px); }
+  .error-banner { display: none; background: color-mix(in srgb, var(--danger) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+    color: var(--danger); border-radius: 8px; padding: 10px 12px; font-size: 13px; }
+  .error-banner.show { display: block; }
+
+  .event-banner { display: flex; align-items: baseline; gap: 10px; padding: 10px 16px; }
+  .event-banner-label { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; flex: none; }
+  .event-banner-msg { font-family: var(--font-mono); font-size: 13px; }
+
+  .topo { position: relative; }
+  .topo svg { width: 100%; height: auto; display: block; }
+  .node-label { font-family: var(--font-mono); }
+  .flow-path { fill: none; stroke: var(--line); stroke-width: 2; }
+  .packet { fill: var(--accent); filter: drop-shadow(0 0 4px var(--accent)); }
+  .node-circle { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; transition: stroke 0.5s ease, stroke-width 0.5s ease; }
+  .node-circle.active { stroke: var(--accent); stroke-width: 3; }
+  .node-circle.quarantine { stroke: var(--danger); }
+  .node-circle.correction { stroke: var(--correction); }
+  .correction-ring { fill: none; stroke: var(--correction); stroke-width: 3; opacity: 0; pointer-events: none; }
+  .correction-label { fill: var(--correction); font-family: var(--font-mono); font-size: 11px; font-weight: 700; opacity: 0; pointer-events: none; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+
+  .node-card h3 { margin: 0 0 2px; font-size: 15px; }
+  .node-card .code { color: var(--muted); font-family: var(--font-mono); font-size: 11.5px; }
+  .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+    font-weight: 600; margin-top: 6px; }
+  .status-pill.active { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+  .status-pill.other { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+
+  .metrics { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+  .metric { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .metric .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  .metric .v { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 14px; }
+  .metric .v.warn { color: var(--warn); }
+  .metric .v.danger { color: var(--danger); }
+  .metric .v.ok { color: var(--ok); }
+  .metric.full { grid-column: 1 / -1; }
+
+  .global-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  @media (max-width: 640px) { .global-grid { grid-template-columns: 1fr 1fr; } }
+  .stat-tile { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; }
+  .stat-tile .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  .stat-tile .v { font-family: var(--font-mono); font-size: 18px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+
+  table.log { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
+  table.log th { text-align: left; color: var(--muted); font-weight: 600; font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: 0.03em; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+  table.log td { padding: 6px 8px; border-bottom: 1px solid var(--line); font-family: var(--font-mono); }
+  table.log tr:last-child td { border-bottom: 0; }
+  .empty-row td { color: var(--muted); font-family: var(--font-display); font-style: italic; }
+  .scroll-x { overflow-x: auto; }
+
+  .legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+  .legend .item { display: flex; gap: 10px; align-items: flex-start; }
+  .legend .num { font-family: var(--font-mono); font-size: 12px; color: var(--accent); font-weight: 700; flex: none; width: 20px; }
+  .legend .text b { display: block; font-size: 13px; margin-bottom: 2px; }
+  .legend .text span { color: var(--muted); font-size: 12.5px; }
+
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top-row">
+    <div>
+      <h1>Sync Flow Monitor</h1>
+      <div class="sub">Live view of MaHIS two-way sync, polling your own running demo</div>
+    </div>
+    <span class="live-pill off" id="live-pill"><span class="dot"></span><span id="live-text">not connected</span></span>
+  </div>
+
+  <div class="panel event-banner">
+    <span class="event-banner-label">Last event</span>
+    <span class="event-banner-msg" id="last-event-msg">Waiting for first update…</span>
+  </div>
+
+  <div class="panel">
+    <div class="settings">
+      <div class="field">
+        <label for="central-url">Central URL</label>
+        <input id="central-url" value="http://localhost:4200" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="admin-token">Admin token</label>
+        <input id="admin-token" value="demo-admin-token" autocomplete="off">
+      </div>
+      <div class="field narrow">
+        <label for="poll-ms">Poll (s)</label>
+        <input id="poll-ms" value="3" type="number" min="1" max="30">
+      </div>
+      <button class="primary" id="connect-btn">Connect</button>
+    </div>
+    <div class="error-banner" id="error-banner" style="margin-top:10px"></div>
+  </div>
+
+  <div class="panel topo">
+    <h2>Topology — live push traffic</h2>
+    <svg viewBox="0 0 900 220" id="topo-svg" role="img" aria-label="KCH and ZCH connected to Central">
+      <path id="path-kch" class="flow-path" d="M 150 60 C 400 60, 400 110, 450 110" />
+      <path id="path-zch" class="flow-path" d="M 150 170 C 400 170, 400 110, 450 110" />
+      <g id="node-kch">
+        <circle class="node-circle" cx="110" cy="60" r="46"></circle>
+        <text x="110" y="55" text-anchor="middle" class="node-label" fill="var(--fg)" font-size="13" font-weight="700">KCH</text>
+        <text x="110" y="72" text-anchor="middle" class="node-label" fill="var(--muted)" font-size="9">Kamuzu Central</text>
+      </g>
+      <g id="node-zch">
+        <circle class="node-circle" cx="110" cy="170" r="46"></circle>
+        <text x="110" y="165" text-anchor="middle" class="node-label" fill="var(--fg)" font-size="13" font-weight="700">ZCH</text>
+        <text x="110" y="182" text-anchor="middle" class="node-label" fill="var(--muted)" font-size="9">Zomba Central</text>
+      </g>
+      <g id="node-central">
+        <circle class="node-circle" cx="490" cy="110" r="54"></circle>
+        <circle class="correction-ring" id="correction-ring" cx="490" cy="110" r="54"></circle>
+        <text x="490" y="104" text-anchor="middle" class="node-label" fill="var(--fg)" font-size="14" font-weight="700">CENTRAL</text>
+        <text x="490" y="122" text-anchor="middle" class="node-label" fill="var(--muted)" font-size="9" id="feed-size-label">feed: — changes</text>
+        <text x="490" y="148" text-anchor="middle" class="correction-label" id="correction-label">correction issued</text>
+      </g>
+    </svg>
+    <div class="sub" style="margin-top:4px">A teal dot travels from a site to Central the instant that site's last-received-batch timestamp changes — a real push, not a simulation. Downstream delivery to the *other* site only happens on referral (hydrate), which this diagram doesn't carry — demonstrate that by searching the patient at the other site. A purple ring pulses directly on Central when central itself issues a correction (it originates there, not travels from a site).</div>
+  </div>
+
+  <div class="grid" id="node-grid"></div>
+
+  <div class="panel">
+    <h2>Central feed</h2>
+    <div class="global-grid">
+      <div class="stat-tile" title="Every change any site has ever pushed to Central's feed."><div class="k">Total changes</div><div class="v" id="g-feed">—</div></div>
+      <div class="stat-tile" title="Protected-field conflicts (national ID, birth date, sex, death status) waiting for a data officer to pick a side — never auto-resolved."><div class="k">Conflicts open</div><div class="v" id="g-open-conf">—</div></div>
+      <div class="stat-tile" title="Ordinary field conflicts Central resolved itself using Hybrid Logical Clock ordering (last writer wins)."><div class="k">Conflicts auto-resolved</div><div class="v" id="g-logged-conf">—</div></div>
+      <div class="stat-tile" title="Patients flagged as possibly the same person across sites (matched by national ID, or name + sex + birthdate). Never auto-merged."><div class="k">Possible duplicates</div><div class="v" id="g-dupes">—</div></div>
+    </div>
+
+    <div style="margin-top:16px" class="scroll-x">
+      <h2 style="margin-bottom:6px">Central corrections</h2>
+      <table class="log" id="corrections-table">
+        <thead><tr><th>When</th><th>Table</th><th>Row</th><th>Changed</th><th>Reason</th></tr></thead>
+        <tbody><tr class="empty-row"><td colspan="5">None yet</td></tr></tbody>
+      </table>
+    </div>
+
+    <div style="margin-top:16px" class="scroll-x">
+      <h2 style="margin-bottom:6px">Recent alerts</h2>
+      <table class="log" id="alerts-table">
+        <thead><tr><th>Time</th><th>Site</th><th>Kind</th><th>Message</th></tr></thead>
+        <tbody><tr class="empty-row"><td colspan="4">Waiting for data…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>What to watch, by test scenario</h2>
+    <div class="legend">
+      <div class="item"><span class="num">1</span><div class="text"><b>Forward push</b><span>Register a patient at a site. Watch the dot travel to Central and that site's Events received climb.</span></div></div>
+      <div class="item"><span class="num">2</span><div class="text"><b>Referral / on-demand pull</b><span>Hydrate a patient into the other site (not shown here). Then any further edit at either site pushes normally — watch the dot again.</span></div></div>
+      <div class="item"><span class="num">3</span><div class="text"><b>Offline / reconnect</b><span>Disconnect a site's agent from the wan network. Watch its Unsent climb and Oldest unsent age. Reconnect — watch it drain back to zero.</span></div></div>
+      <div class="item"><span class="num">4</span><div class="text"><b>Conflict handling</b><span>Edit the same field at both sites quickly. Watch Conflicts open or auto-resolved move.</span></div></div>
+      <div class="item"><span class="num">5</span><div class="text"><b>Reconciliation</b><span>Wait for the scheduled interval. Watch each site's Last reconciliation move off "—".</span></div></div>
+      <div class="item"><span class="num">6</span><div class="text"><b>Duplicate detection</b><span>Register two patients with the same name, sex and birthdate at different sites. Watch Possible duplicates increase.</span></div></div>
+      <div class="item"><span class="num">7</span><div class="text"><b>Central correction</b><span>POST to /admin/corrections. Watch a purple ring pulse on Central itself (it originates there) and a row appear in Central corrections below.</span></div></div>
+      <div class="item"><span class="num">8</span><div class="text"><b>Raw edit at central (what not to do)</b><span>Run a plain SQL UPDATE directly against central-db. Nothing on this screen moves — no pulse, no dot, no row anywhere. That silence is the point: it proves the edit is invisible to sync.</span></div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var els = {
+    url: document.getElementById('central-url'),
+    token: document.getElementById('admin-token'),
+    pollS: document.getElementById('poll-ms'),
+    connectBtn: document.getElementById('connect-btn'),
+    livePill: document.getElementById('live-pill'),
+    liveText: document.getElementById('live-text'),
+    errorBanner: document.getElementById('error-banner'),
+    nodeGrid: document.getElementById('node-grid'),
+    feedSizeLabel: document.getElementById('feed-size-label'),
+    gFeed: document.getElementById('g-feed'),
+    gOpenConf: document.getElementById('g-open-conf'),
+    gLoggedConf: document.getElementById('g-logged-conf'),
+    gDupes: document.getElementById('g-dupes'),
+    alertsTable: document.querySelector('#alerts-table tbody'),
+    correctionsTable: document.querySelector('#corrections-table tbody'),
+    correctionRing: document.getElementById('correction-ring'),
+    correctionLabel: document.getElementById('correction-label'),
+    lastEventMsg: document.getElementById('last-event-msg')
+  };
+
+  try {
+    var saved = JSON.parse(localStorage.getItem('syncFlowMonitor.settings') || '{}');
+    if (saved.url) els.url.value = saved.url;
+    if (saved.token) els.token.value = saved.token;
+    if (saved.pollS) els.pollS.value = saved.pollS;
+  } catch (e) { /* ignore */ }
+
+  var timer = null;
+  var lastBatchAt = {};
+  var lastCorrectionCount = null;
+
+  // "Last event" banner: a real delta off data the dashboard already returns
+  // (counts, not a per-event description the backend doesn't expose).
+  var prevSiteEvents = {};
+  var prevDuplicatesLen = null;
+  var prevAlertsLen = null;
+  var prevCorrectionsLen = null;
+  var lastEventText = 'Waiting for first update…';
+  var lastEventAt = null;
+
+  function formatAgo(ms) {
+    var s = Math.round(ms / 1000);
+    if (s < 2) return 'just now';
+    if (s < 60) return s + 's ago';
+    return Math.round(s / 60) + 'm ago';
+  }
+
+  function updateLastEvent(data) {
+    var now = Date.now();
+    var corrections = data.corrections || [];
+    var alerts = data.alerts || [];
+    var dupLen = (data.duplicates || []).length;
+    var found = null;
+
+    if (prevCorrectionsLen != null && corrections.length > prevCorrectionsLen) {
+      var c = corrections[0];
+      found = 'Central correction: ' + (c.table_name || '?') +
+        (c.row_uuid ? ' ' + String(c.row_uuid).slice(0, 8) + '…' : '') +
+        (c.reason ? ' — ' + c.reason : '');
+    }
+
+    if (!found && prevDuplicatesLen != null && dupLen > prevDuplicatesLen) {
+      found = 'Possible duplicate patient flagged (' + dupLen + ' total awaiting review)';
+    }
+
+    if (!found) {
+      data.sites.forEach(function (s) {
+        var prevN = prevSiteEvents[s.site_code];
+        var curN = s.events_received;
+        if (!found && typeof curN === 'number' && typeof prevN === 'number' && curN > prevN) {
+          found = s.name + ': ' + (curN - prevN) + ' change(s) pushed and applied at Central (events received ' +
+            prevN + ' → ' + curN + ')';
+        }
+      });
+    }
+
+    if (!found && prevAlertsLen != null && alerts.length > prevAlertsLen) {
+      var a = alerts[0];
+      found = 'Alert' + (a && a.site_code ? ' (' + a.site_code + ')' : '') + ': ' + (a ? a.message : '');
+    }
+
+    if (found) {
+      lastEventText = found;
+      lastEventAt = now;
+    }
+
+    data.sites.forEach(function (s) {
+      if (typeof s.events_received === 'number') prevSiteEvents[s.site_code] = s.events_received;
+    });
+    prevDuplicatesLen = dupLen;
+    prevAlertsLen = alerts.length;
+    prevCorrectionsLen = corrections.length;
+
+    els.lastEventMsg.textContent = lastEventText + (lastEventAt ? '  ·  ' + formatAgo(now - lastEventAt) : '');
+  }
+
+  function saveSettings() {
+    try {
+      localStorage.setItem('syncFlowMonitor.settings', JSON.stringify({
+        url: els.url.value, token: els.token.value, pollS: els.pollS.value
+      }));
+    } catch (e) { /* ignore */ }
+  }
+
+  function setLive(on, text) {
+    els.livePill.className = 'live-pill ' + (on ? 'on' : 'off');
+    els.liveText.textContent = text;
+  }
+
+  function showError(msg) {
+    els.errorBanner.textContent = msg;
+    els.errorBanner.classList.add('show');
+  }
+  function clearError() {
+    els.errorBanner.classList.remove('show');
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function renderNodeCard(site) {
+    var unsentTotal = Object.values(site.backlog || {}).reduce(function (a, b) { return a + b; }, 0);
+    var statusClass = site.status === 'active' ? 'active' : 'other';
+    var rec = site.reconciliation;
+    var recText = rec ? (rec.status + ', ' + rec.differences + ' diff') : '—';
+    var triggers = site.triggers || '—';
+    var clockOffset = site.clock_offset_s != null ? site.clock_offset_s + ' s' : '—';
+    var heartbeat = site.heartbeat_age_s != null ? site.heartbeat_age_s + ' s ago' : '—';
+    return '' +
+      '<div class="panel node-card" data-site="' + escapeHtml(site.site_code) + '">' +
+        '<h3>' + escapeHtml(site.name) + '</h3>' +
+        '<div class="code">' + escapeHtml(site.site_code) + (site.location_id ? ' · location ' + site.location_id : '') + '</div>' +
+        '<span class="status-pill ' + statusClass + '">' + escapeHtml(site.status) + '</span>' +
+        '<div class="metrics">' +
+          '<div class="metric" title="Captured local changes not yet pushed to Central."><div class="k">Unsent</div><div class="v ' + (unsentTotal > 0 ? 'warn' : 'ok') + '">' + unsentTotal + '</div></div>' +
+          '<div class="metric" title="Age of the oldest unsent change — how far behind this site could fall before it gets flagged."><div class="k">Oldest unsent</div><div class="v ' + (site.oldest_unsent_s > 300 ? 'warn' : '') + '">' + (site.oldest_unsent_s != null ? site.oldest_unsent_s + ' s' : '—') + '</div></div>' +
+          '<div class="metric" title="Changes from this site that Central has validated and applied so far."><div class="k">Events received</div><div class="v">' + site.events_received + '</div></div>' +
+          '<div class="metric" title="Rows Central holds in this site\'s dedicated backup copy — used only to check for drift during reconciliation, not Central\'s own working data."><div class="k">Backup rows</div><div class="v">' + site.backup_rows + '</div></div>' +
+          '<div class="metric" title="Events held back because they failed a validation check. A data officer must release or fix them before they apply."><div class="k">Quarantine</div><div class="v ' + (site.open_quarantine > 0 ? 'danger' : 'ok') + '">' + site.open_quarantine + '</div></div>' +
+          '<div class="metric" title="Events waiting behind a quarantined one (their dependents) — applied automatically once it is resolved."><div class="k">Parked at site</div><div class="v">' + site.parked + (site.orphaned ? ' (' + site.orphaned + ' orphaned)' : '') + '</div></div>' +
+          '<div class="metric" title="Difference between this site\'s clock and Central\'s, from the last heartbeat."><div class="k">Clock offset</div><div class="v">' + clockOffset + '</div></div>' +
+          '<div class="metric" title="Whether this site\'s MySQL capture triggers (installed by rake site_sync:install) are present and healthy."><div class="k">Triggers</div><div class="v">' + escapeHtml(triggers) + '</div></div>' +
+          '<div class="metric" title="Time since this site\'s last heartbeat ping to Central."><div class="k">Heartbeat</div><div class="v">' + heartbeat + '</div></div>' +
+          '<div class="metric full" title="Result of the most recent Merkle-tree comparison between this site\'s live data and Central\'s backup copy of it."><div class="k">Last reconciliation</div><div class="v">' + escapeHtml(recText) + '</div></div>' +
+        '</div>' +
+      '</div>';
+  }
+
+  function firePacket(site_code) {
+    var pathId = site_code === 'KCH' ? 'path-kch' : (site_code === 'ZCH' ? 'path-zch' : null);
+    if (!pathId) return;
+    var path = document.getElementById(pathId);
+    if (!path) return;
+    var svgNS = 'http://www.w3.org/2000/svg';
+    var dot = document.createElementNS(svgNS, 'circle');
+    dot.setAttribute('r', '8');
+    dot.setAttribute('class', 'packet');
+    path.parentNode.appendChild(dot);
+    var len = path.getTotalLength();
+    var start = performance.now();
+    var duration = 3200; // slow and deliberate, so a stakeholder can actually track it
+    function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+    var srcCircle = document.querySelector('#node-' + site_code.toLowerCase() + ' circle');
+    var centralCircle = document.querySelector('#node-central circle');
+    if (srcCircle) srcCircle.classList.add('active');
+
+    function step(now) {
+      var raw = Math.min(1, (now - start) / duration);
+      var t = easeInOutCubic(raw);
+      var p = path.getPointAtLength(t * len);
+      dot.setAttribute('cx', p.x);
+      dot.setAttribute('cy', p.y);
+      dot.setAttribute('opacity', String(1 - raw * 0.15));
+      if (raw < 1) {
+        requestAnimationFrame(step);
+      } else {
+        dot.remove();
+        if (srcCircle) srcCircle.classList.remove('active');
+        if (centralCircle) {
+          centralCircle.classList.add('active');
+          setTimeout(function () { centralCircle.classList.remove('active'); }, 900);
+        }
+      }
+    }
+    requestAnimationFrame(step);
+  }
+
+  function fireCorrectionPulse() {
+    var ring = els.correctionRing;
+    var label = els.correctionLabel;
+    if (!ring) return;
+    var start = performance.now();
+    var duration = 2600;
+    ring.setAttribute('r', '54');
+    label.style.opacity = '1';
+    function step(now) {
+      var t = Math.min(1, (now - start) / duration);
+      var r = 54 + t * 26;
+      ring.setAttribute('r', String(r));
+      ring.style.opacity = String(1 - t);
+      if (t < 1) {
+        requestAnimationFrame(step);
+      } else {
+        ring.style.opacity = '0';
+        label.style.opacity = '0';
+      }
+    }
+    requestAnimationFrame(step);
+  }
+
+  function render(data) {
+    updateLastEvent(data);
+
+    var cards = data.sites.map(renderNodeCard).join('');
+    els.nodeGrid.innerHTML = cards;
+
+    els.feedSizeLabel.textContent = 'feed: ' + data.feed_size + ' changes';
+    els.gFeed.textContent = data.feed_size;
+    els.gOpenConf.textContent = data.open_conflicts;
+    els.gLoggedConf.textContent = data.logged_conflicts;
+    els.gDupes.textContent = (data.duplicates || []).length;
+
+    var quarantineAny = data.sites.some(function (s) { return s.open_quarantine > 0; });
+    var centralCircle = document.querySelector('#node-central circle');
+    if (centralCircle) centralCircle.classList.toggle('quarantine', quarantineAny);
+
+    if (data.alerts && data.alerts.length) {
+      els.alertsTable.innerHTML = data.alerts.slice(0, 8).map(function (a) {
+        var t = a.created_at ? new Date(a.created_at).toLocaleTimeString() : '—';
+        return '<tr><td>' + escapeHtml(t) + '</td><td>' + escapeHtml(a.site_code || '—') + '</td>' +
+          '<td>' + escapeHtml(a.kind) + '</td><td>' + escapeHtml(a.message) + '</td></tr>';
+      }).join('');
+    } else {
+      els.alertsTable.innerHTML = '<tr class="empty-row"><td colspan="4">No alerts</td></tr>';
+    }
+
+    var corrections = data.corrections || [];
+    if (corrections.length) {
+      els.correctionsTable.innerHTML = corrections.slice(0, 8).map(function (c) {
+        var t = c.created_at ? new Date(c.created_at).toLocaleString() : '—';
+        var changesObj = c.changes_json;
+        if (typeof changesObj === 'string') {
+          try { changesObj = JSON.parse(changesObj); } catch (e) { changesObj = {}; }
+        }
+        var changed = Object.keys(changesObj || {}).join(', ');
+        return '<tr><td>' + escapeHtml(t) + '</td><td>' + escapeHtml(c.table_name) + '</td>' +
+          '<td><code>' + escapeHtml(c.row_uuid) + '</code></td><td>' + escapeHtml(changed) + '</td>' +
+          '<td>' + escapeHtml(c.reason) + '</td></tr>';
+      }).join('');
+    } else {
+      els.correctionsTable.innerHTML = '<tr class="empty-row"><td colspan="5">None yet</td></tr>';
+    }
+    if (lastCorrectionCount != null && corrections.length > lastCorrectionCount) {
+      fireCorrectionPulse();
+    }
+    lastCorrectionCount = corrections.length;
+
+    data.sites.forEach(function (s) {
+      var prev = lastBatchAt[s.site_code];
+      if (s.last_batch_at && prev && s.last_batch_at !== prev) {
+        firePacket(s.site_code);
+      }
+      lastBatchAt[s.site_code] = s.last_batch_at;
+    });
+  }
+
+  function poll() {
+    var base = els.url.value.replace(/\/+$/, '');
+    var token = els.token.value;
+    fetch(base + '/api/v1/site_sync/admin/dashboard', {
+      headers: { 'Accept': 'application/json', 'X-Admin-Token': token }
+    }).then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status + (res.status === 401 ? ' — check the admin token' : ''));
+      return res.json();
+    }).then(function (data) {
+      clearError();
+      setLive(true, 'live · updated ' + new Date().toLocaleTimeString());
+      render(data);
+    }).catch(function (err) {
+      setLive(false, 'disconnected');
+      showError('Could not reach central: ' + err.message + '. Check the URL, that docker compose is up, and the admin token.');
+    });
+  }
+
+  function start() {
+    saveSettings();
+    if (timer) clearInterval(timer);
+    poll();
+    var seconds = Math.max(1, Math.min(30, Number(els.pollS.value) || 3));
+    timer = setInterval(poll, seconds * 1000);
+  }
+
+  els.connectBtn.addEventListener('click', start);
+  [els.url, els.token, els.pollS].forEach(function (el) {
+    el.addEventListener('keydown', function (e) { if (e.key === 'Enter') start(); });
+  });
+
+  els.nodeGrid.innerHTML = [
+    { site_code: 'KCH', name: 'Kamuzu Central Hospital', location_id: 527, status: '—', backlog: {}, events_received: '—', backup_rows: '—', open_quarantine: 0, parked: '—', orphaned: 0, clock_offset_s: null, triggers: '—', heartbeat_age_s: null, reconciliation: null, oldest_unsent_s: null },
+    { site_code: 'ZCH', name: 'Zomba Central Hospital', location_id: 1507, status: '—', backlog: {}, events_received: '—', backup_rows: '—', open_quarantine: 0, parked: '—', orphaned: 0, clock_offset_s: null, triggers: '—', heartbeat_age_s: null, reconciliation: null, oldest_unsent_s: null }
+  ].map(renderNodeCard).join('');
+
+  start();
+})();
+</script>
+</body>
+</html>

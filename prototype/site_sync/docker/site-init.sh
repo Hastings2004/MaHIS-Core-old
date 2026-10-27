@@ -1,7 +1,7 @@
 #!/bin/bash
 # One-time preparation of a hospital site's database, run by the site's
 # "init" container before its API and sync agent start. Safe to rerun: a
-# database that already has the sync tables is left alone.
+# database this script has already set up for this exact site is left alone.
 #
 # Needs: DB_HOST, DB_ROOT_PASSWORD, MAHIS_SITE_LOCATION_ID, and the site's
 # sync settings (MAHIS_SYNC_ROLE, MAHIS_SITE_CODE, SITE_SYNC_TRIGGER_DEFINER).
@@ -13,7 +13,16 @@ db() { mysql -h"$DB_HOST" -uroot "$@"; }
 echo "[$MAHIS_SITE_CODE] waiting for the database (the first start loads the MaHIS data, a few minutes)..."
 until db -e 'SELECT 1' mahis >/dev/null 2>&1; do sleep 3; done
 
-if db -N -e "SHOW TABLES LIKE 'sync_state'" mahis | grep -q sync_state; then
+# Whether this *site* has been through this script before is not the same
+# question as whether the sync tables exist: the starting-data dump this
+# loads from is itself built from a database that already has them, so a
+# completely fresh deploy would always see them present. This site's own
+# current_health_center_id is never set in that dump -- only by a real run
+# of this script, for this exact site -- so it is the safe signal to exit
+# early on. Table creation is guarded separately, since it is not safe to
+# repeat (no "if not exists") if the dump already carries empty sync tables.
+current_location=$(db -N -e "SELECT property_value FROM global_property WHERE property = 'current_health_center_id'" mahis 2>/dev/null || true)
+if [ "$current_location" = "$MAHIS_SITE_LOCATION_ID" ]; then
   echo "[$MAHIS_SITE_CODE] already prepared"
   exit 0
 fi
@@ -21,11 +30,15 @@ fi
 # As the database administrator.
 export DATABASE_URL="mysql2://root:${DB_ROOT_PASSWORD}@${DB_HOST}:3306/mahis"
 
-echo "[$MAHIS_SITE_CODE] creating the sync tables"
-bin/rails runner '
-  require Rails.root.join("db/migrate/20261014000000_create_site_sync_tables.rb").to_s
-  CreateSiteSyncTables.new.migrate(:up)
-  ActiveRecord::Base.lease_connection.execute("INSERT IGNORE INTO schema_migrations (version) VALUES (\"20261014000000\")")'
+if db -N -e "SHOW TABLES LIKE 'sync_state'" mahis | grep -q sync_state; then
+  echo "[$MAHIS_SITE_CODE] sync tables already present (from the starting data)"
+else
+  echo "[$MAHIS_SITE_CODE] creating the sync tables"
+  bin/rails runner '
+    require Rails.root.join("db/migrate/20261014000000_create_site_sync_tables.rb").to_s
+    CreateSiteSyncTables.new.migrate(:up)
+    ActiveRecord::Base.lease_connection.execute("INSERT IGNORE INTO schema_migrations (version) VALUES (\"20261014000000\")")'
+fi
 
 echo "[$MAHIS_SITE_CODE] setting the facility (location $MAHIS_SITE_LOCATION_ID)"
 db mahis -e "

@@ -24,6 +24,13 @@ x-core: &core
     RAILS_ENV: development
     SITE_SYNC_LOG_LEVEL: info
     SITE_SYNC_ADMIN_TOKEN: ${SITE_SYNC_ADMIN_TOKEN:-demo-admin-token}
+    # Encrypts sync_sites.secret at rest (see SecretCipher). Must be the
+    # same value everywhere central-init and central-api run, which a
+    # per-container Rails secret_key_base is not: in development, without a
+    # committed config/master.key, each container generates its own random
+    # one in tmp/development_secret.txt, so encrypting in one container and
+    # decrypting in another would never match.
+    SITE_SYNC_SECRET_ENCRYPTION_KEY: ${SITE_SYNC_SECRET_ENCRYPTION_KEY:-demo-secret-cipher-key-change-me-000000000000000000000000000000000}
 
 x-db: &db
   image: ${MYSQL_IMAGE:-mysql:8.0.35}

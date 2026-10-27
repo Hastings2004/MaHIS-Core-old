@@ -108,8 +108,9 @@ pointed at a real site or server:
   like the sites' `mahis_app`/`mahis_sync`. Give it its own scoped account.
 - **Default passwords and secrets are public in this file**
   (`DB_ROOT_PASSWORD` defaults to `root`; `mahis_app`/`mahis_sync` passwords
-  are `app`/`sync` from `db-init/00-accounts.sql`; the site secrets are
-  `*-demo-secret-change-me-...`). All of these must be replaced.
+  are `app`/`sync` from `db-init/00-accounts.sql`; the site secrets and
+  `SITE_SYNC_SECRET_ENCRYPTION_KEY` are `*-demo-secret-change-me-...`/
+  `demo-secret-cipher-key-change-me-...`). All of these must be replaced.
 - **Ports are bound to `127.0.0.1` only** so this demo isn't reachable from
   the rest of the network; a real deployment needs its own access control
   in front of these services, not just a different bind address.
