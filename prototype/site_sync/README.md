@@ -142,6 +142,17 @@ site server with `rake site_sync:benchmark` (stop the agent first).
   `rake site_sync:reconcile REPAIR_CENTRAL=<uuid>,<uuid> REPAIR_SITE=<uuid>`
   (central's copy is right / the site's copy is right), or all held rows at
   once with `REPAIR_DIFFERENT=central|site`.
+- **A direct central edit refreshes the owning site's backup copy too, not
+  just the feed.** `sync_site_backup` -- the copy reconciliation compares a
+  site against -- is normally only kept current by that site's own pushes
+  (`CentralIngest#update_mirror`). A change central makes directly
+  (`CentralCorrection`, or central's own capture/publish loop --
+  `LocalPublisher`) has no push to refresh it from, so both call
+  `Central.refresh_backup` right after `Central.publish`. Without it, the
+  owning site's next reconciliation run would see its own, correctly-pulled
+  row as "different" from a backup still holding the pre-edit value -- and a
+  data officer resolving that the wrong way round would write the stale
+  value back, undoing the edit.
 - **A site clock that runs ahead is capped, not refused.** Central stamps such
   changes with its own current time (not time plus the allowed margin, which
   would let them beat genuine edits from other sites), raises an alert, and
@@ -219,7 +230,7 @@ site server with `rake site_sync:benchmark` (stop the agent first).
 | Central validation, quarantine, field-level merge | `app/services/site_sync/central_ingest.rb` |
 | Pull, on-demand patient fetch | `app/services/site_sync/puller.rb`, `downstream_applier.rb` |
 | Central captures and publishes its own changes | `app/services/site_sync/local_publisher.rb`, `rake site_sync:publish_local` |
-| Merkle reconciliation | `lib/site_sync/merkle.rb`, `app/services/site_sync/reconciler.rb` |
+| Merkle reconciliation, central's backup copy refresh | `lib/site_sync/merkle.rb`, `app/services/site_sync/reconciler.rb`, `Central.refresh_backup` |
 | Restore | `app/services/site_sync/restore.rb`, `Api::V1::SiteSync::RestoreController` |
 | Dashboard, heartbeat | `app/services/site_sync/dashboard.rb`, `heartbeat.rb` |
 | Endpoints | `app/controllers/api/v1/site_sync/`, routes under `/api/v1/site_sync` |

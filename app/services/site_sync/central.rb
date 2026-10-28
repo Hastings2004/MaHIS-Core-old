@@ -83,6 +83,45 @@ module SiteSync
         VALUES (#{q(from_site)}, #{q(for_site)}, #{q(table)}, #{q(operation)}, #{q(uuid)}, #{q(patient_uuid)},
                 #{change_time}, #{q(event.to_json)}, NOW(6))
       SQL
+      change_time
+    end
+
+    # Keeps central's backup copy of the owning site's row (the one that
+    # site's own reconciliation run compares itself against) in step with a
+    # change central makes directly -- CentralCorrection or LocalPublisher.
+    # Normal sync only refreshes this backup from a site's own push
+    # (CentralIngest#update_mirror); without this call too, the owning
+    # site's next reconciliation sees its own, correctly-pulled row as
+    # "different" from a backup that still holds whatever it last pushed
+    # itself -- and a data officer resolving that the wrong way round would
+    # write the stale backup value back, undoing the direct edit.
+    def refresh_backup(table:, uuid:, operation:, store:, change_time:)
+      owner = connection.select_value(
+        "SELECT site_code FROM sync_row_owners WHERE table_name = #{q(table)} AND row_uuid = #{q(uuid)}"
+      )
+      return if owner.nil? || owner == 'CENTRAL'
+
+      if operation == 'D'
+        connection.execute(<<~SQL)
+          UPDATE sync_site_backup SET deleted = 1, change_time = #{change_time}, updated_at = NOW(6)
+          WHERE site_code = #{q(owner)} AND table_name = #{q(table)} AND row_uuid = #{q(uuid)}
+        SQL
+        return
+      end
+
+      hashed = connection.select_one(<<~SQL)
+        SELECT local_id, row_hash FROM (#{RowSql.hashed_rows(table)}) x WHERE x.row_uuid = #{q(uuid)}
+      SQL
+      return unless hashed
+
+      row = store.current(table, hashed['local_id'])
+      connection.execute(<<~SQL)
+        INSERT INTO sync_site_backup (site_code, table_name, row_uuid, local_id, row_json, row_hash, change_time, deleted, updated_at)
+        VALUES (#{q(owner)}, #{q(table)}, #{q(uuid)}, #{hashed['local_id'].to_i}, #{q(row.to_json)}, #{q(hashed['row_hash'])},
+                #{change_time}, 0, NOW(6))
+        ON DUPLICATE KEY UPDATE local_id = VALUES(local_id), row_json = VALUES(row_json), row_hash = VALUES(row_hash),
+                                change_time = VALUES(change_time), deleted = 0, updated_at = VALUES(updated_at)
+      SQL
     end
 
     def patient_of_deleted(table, uuid)

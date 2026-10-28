@@ -55,9 +55,10 @@ module SiteSync
       record_field_versions(table, uuid, changed_cols, row) if operation != 'D' && !Config.clinical?(table)
 
       Central.subscribe(SITE_CODE, uuid, 'own') if table == 'person' && operation != 'D'
-      Central.publish(table:, operation:, uuid:, from_site: SITE_CODE, codec: @codec, store: @store,
-                      seen_change_time: Hlc.from_time(row['captured_at']),
-                      columns: operation == 'U' && changed_cols.any? ? changed_cols : nil)
+      change_time = Central.publish(table:, operation:, uuid:, from_site: SITE_CODE, codec: @codec, store: @store,
+                                    seen_change_time: Hlc.from_time(row['captured_at']),
+                                    columns: operation == 'U' && changed_cols.any? ? changed_cols : nil)
+      Central.refresh_backup(table:, uuid:, operation:, store: @store, change_time:)
     end
 
     # Which columns actually changed, from the before/after snapshot the

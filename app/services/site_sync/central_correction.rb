@@ -36,8 +36,9 @@ module SiteSync
             INSERT INTO sync_central_corrections (table_name, row_uuid, changes_json, previous_json, reason, created_at)
             VALUES (#{q(table)}, #{q(uuid)}, #{q(changes.to_json)}, #{q(previous.to_json)}, #{q(reason)}, NOW(6))
           SQL
-          Central.publish(table:, operation: 'U', uuid:, from_site: 'CENTRAL', codec: @codec, store: @store,
-                          seen_change_time: Central.next_hlc, columns: changes.keys)
+          change_time = Central.publish(table:, operation: 'U', uuid:, from_site: 'CENTRAL', codec: @codec, store: @store,
+                                        seen_change_time: Central.next_hlc, columns: changes.keys)
+          Central.refresh_backup(table:, uuid:, operation: 'U', store: @store, change_time:)
         end
       end
       { 'table' => table, 'uuid' => uuid, 'changed' => changes.keys, 'previous' => previous }
