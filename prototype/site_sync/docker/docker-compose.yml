@@ -83,9 +83,10 @@ services:
       dockerfile: prototype/site_sync/docker/core.Dockerfile
     restart: "no"
     command: ["prototype/site_sync/docker/central-init.sh"]
-    environment:
+    environment: &central-env
       <<: *core-env
       MAHIS_SYNC_ROLE: central
+      SITE_SYNC_TRIGGER_DEFINER: "'mahis_sync'@'%'"
       DB_HOST: central-db
       DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root}
       KCH_SECRET: ${KCH_SECRET:-kch-demo-secret-change-me-000000000000000000000000000000000}
@@ -99,14 +100,38 @@ services:
   central-api:
     <<: *core
     environment:
-      <<: *core-env
-      MAHIS_SYNC_ROLE: central
+      <<: *central-env
+      # Still root, deliberately: the `site_sync:grants` privilege model
+      # assumes the app account only ever *reads* sync_* tables (a site's
+      # own triggers/agent do all its sync writes). Central's api is
+      # different -- BatchesController, FeedController, AdminController etc.
+      # write sync_request_nonces/sync_central_feed/sync_alerts/... directly
+      # as part of handling requests, with no separate process doing it for
+      # them. Giving central-api the same restricted account breaks sync
+      # outright (confirmed: INSERT denied on sync_request_nonces). Needs its
+      # own privilege model, not a copy of the site one -- see README's
+      # "Not a production template".
       DATABASE_URL: mysql2://root:${DB_ROOT_PASSWORD:-root}@central-db:3306/mahis
       REDIS_URL: redis://central-redis:6379/1
       SIDEKIQ_REDIS_URL: redis://central-redis:6379/0
     depends_on: { central-init: { condition: service_completed_successfully } }
     ports: ["127.0.0.1:4200:3000"]
     networks: [central, wan]
+
+  # Central captures and publishes its own changes exactly like a site's
+  # agent pushes its own -- except there's no batch, no HTTP, nowhere to
+  # push to: it just walks central's own sync_change_log and republishes
+  # each row via Central.publish(from_site: 'CENTRAL', ...). See
+  # SiteSync::LocalPublisher and `rake site_sync:publish_local`.
+  central-agent:
+    <<: *core
+    command: ["bin/rake", "site_sync:publish_local"]
+    environment:
+      <<: *central-env
+      DATABASE_URL: mysql2://mahis_sync:sync@central-db:3306/mahis
+      SITE_SYNC_PUBLISH_LOCAL_EVERY: ${SITE_SYNC_PUBLISH_LOCAL_EVERY:-5}
+    depends_on: { central-init: { condition: service_completed_successfully } }
+    networks: [central]
 
   # ------------------------------------------- Kamuzu Central Hospital (KCH)
   kch-db:

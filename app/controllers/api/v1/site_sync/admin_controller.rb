@@ -34,12 +34,20 @@ module Api
         # resolved location, same as the dashboard derives it, so a site's
         # registered name can never drift from its actual facility.
         def register
+          site_code = params.require(:site_code)
+          # Reserved: Central.publish uses this literal as from_site for its
+          # own captured changes (see SiteSync::LocalPublisher). A real site
+          # registering under it would collide with central's own entries.
+          if site_code.to_s.upcase == ::SiteSync::LocalPublisher::SITE_CODE
+            return render json: { error: 'reserved_site_code', code: ::SiteSync::LocalPublisher::SITE_CODE },
+                          status: :unprocessable_entity
+          end
+
           location_uuid = params.require(:location_uuid)
           location = connection.select_one("SELECT location_id, name FROM location WHERE uuid = #{q(location_uuid)}")
           return render json: { error: 'unknown_location' }, status: :unprocessable_entity unless location
 
           secret = SecureRandom.hex(32)
-          site_code = params.require(:site_code)
           ::SiteSync::Central.register_site(site_code, name: location['name'], secret:, location_id: location['location_id'])
           render json: { site_code:, location_id: location['location_id'], name: location['name'], secret: }
         end

@@ -40,4 +40,18 @@ bin/rails runner '
                                    location_id: ENV.fetch("KCH_LOCATION_ID"))
   SiteSync::Central.register_site("ZCH", name: "Zomba Central Hospital", secret: ENV.fetch("ZCH_SECRET"),
                                    location_id: ENV.fetch("ZCH_LOCATION_ID"))'
+
+# Central is deployed as its own facility-like server: its own data can be
+# modified directly, same as any site's, and those changes need to reach
+# every site too -- not just the admin-only corrections path. So central
+# gets the same capture triggers a site gets, publishing what they capture
+# via `rake site_sync:publish_local` (central-agent) instead of pushing it
+# over HTTP, since central has nowhere to push to but itself.
+echo "[central] installing capture triggers and queueing any existing local data"
+bin/rake site_sync:install
+bin/rake site_sync:snapshot
+
+echo "[central] restricting the app and sync database accounts"
+bin/rake "site_sync:grants[mahis_app,mahis_sync]" 2>/dev/null | grep -E '^(REVOKE|GRANT)' | db
+
 echo "[central] ready"

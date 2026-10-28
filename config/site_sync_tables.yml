@@ -48,14 +48,59 @@ tables:
     class: clinical
     priority: bulk
     patient_ref: patient_id
-    refs: { patient_id: patient, provider_id: person }
+    refs: { patient_id: patient, provider_id: person, visit_id: visit }
 
   obs:
     pk: obs_id
     class: clinical
     priority: bulk
     patient_ref: person_id
-    refs: { person_id: person, encounter_id: encounter, obs_group_id: obs }
+    refs: { person_id: person, encounter_id: encounter, obs_group_id: obs, order_id: orders }
+
+  visit:
+    pk: visit_id
+    class: clinical
+    priority: bulk
+    patient_ref: patient_id
+    refs: { patient_id: patient }
+
+  orders:
+    pk: order_id
+    class: clinical
+    priority: bulk
+    patient_ref: patient_id
+    refs: { patient_id: patient, encounter_id: encounter, obs_id: obs }
+
+  patient_program:
+    pk: patient_program_id
+    class: clinical
+    priority: bulk
+    patient_ref: patient_id
+    refs: { patient_id: patient }
+
+  person_address:
+    pk: person_address_id
+    class: clinical
+    priority: bulk
+    patient_ref: person_id
+    refs: { person_id: person }
+
+  person_attribute:
+    pk: person_attribute_id
+    class: clinical
+    priority: bulk
+    patient_ref: person_id
+    refs: { person_id: person }
+
+  relationship:
+    pk: relationship_id
+    class: clinical
+    priority: bulk
+    # Both ends are a person_id; patient_ref has to pick one -- person_a is
+    # the relationship's "owner" by OpenMRS convention (e.g. the guardian in
+    # a guardian/child relationship), so filtering/subscriptions key off them.
+    patient_ref: person_a
+    refs: { person_a: person, person_b: person }
 
 # Reference data is not synced by the prototype; every node must hold the same
 # rows. Columns pointing at it travel as the referenced row's uuid and are
@@ -79,8 +124,18 @@ reference_refs:
   identifier_type: { table: patient_identifier_type, match: uuid }
   location_id: { table: location, match: uuid }
   program_id: { table: program, match: uuid }
+  visit_type_id: { table: visit_type, match: uuid }
+  indication_concept_id: { table: concept, match: uuid }
+  order_type_id: { table: order_type, match: uuid }
+  orderer: { table: users, match: uuid }
+  discontinued_by: { table: users, match: uuid }
+  discontinued_reason: { table: concept, match: uuid }
+  person_attribute_type_id: { table: person_attribute_type, match: uuid }
+  relationship: { table: relationship_type, match: uuid }
 
 # Columns pointing at tables outside the prototype's scope. Their value is kept
 # in central's backup copy of the site (so a restore is exact) but not copied
-# to another node, where the id would mean something else.
-unsynced_refs: [visit_id, form_id, order_id, value_group_id]
+# to another node, where the id would mean something else. visit_id and
+# order_id used to be here too; both moved into encounter's/obs's own refs:
+# once visit and orders joined the synced tables above.
+unsynced_refs: [form_id, value_group_id]

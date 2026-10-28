@@ -143,7 +143,10 @@ class ApplicationController < ActionController::API
   # request id and user, so central can trace rows back to the call that
   # produced them.
   def tag_sync_request(&)
-    return yield unless SiteSync::Config.site?
+    # Config.enabled?, not site? -- central's own capture triggers need the
+    # same request_id/endpoint/user tagging a site's do, now that central's
+    # local edits are captured and published too (see SiteSync::LocalPublisher).
+    return yield unless SiteSync::Config.enabled?
 
     SiteSync::Context.tag(request_id: request.request_id, endpoint: "#{request.request_method} #{request.path}",
                           user_uuid: User.current&.uuid, &)

@@ -344,4 +344,24 @@ namespace :site_sync do
     end
     log.call('agent stopped')
   end
+
+  desc "Central only: publish central's own captured changes to the feed, on a loop"
+  task publish_local: :environment do
+    every = Float(ENV.fetch('SITE_SYNC_PUBLISH_LOCAL_EVERY', 5))
+    log = ->(msg) { puts "#{Time.now.strftime('%H:%M:%S')} [#{SiteSync::LocalPublisher::SITE_CODE}] #{msg}"; $stdout.flush }
+    stop = false
+    %w[INT TERM].each { |signal| trap(signal) { stop = true } }
+    log.call("local publisher started (every #{every}s)")
+
+    until stop
+      begin
+        published = SiteSync::LocalPublisher.new.run_once
+        log.call("published #{published} change(s)") if published.positive?
+      rescue StandardError => e
+        log.call("error: #{e.class}: #{e.message}")
+      end
+      sleep every
+    end
+    log.call('local publisher stopped')
+  end
 end
